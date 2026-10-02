@@ -1,0 +1,23 @@
+{
+  "name": "world-execute-me-deepseek-whale",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "world.execute(me); · DeepSeek 鲸鱼娘版 — 浏览器音乐可视化 PV（非官方同人）",
+  "scripts": {
+    "data": "python tools/analyze_audio.py && node tools/parse_lrc.mjs && node tools/inventory_whale.mjs && node tools/build_whale.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "node tools/check.mjs"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "delaunator": "^5.0.1",
+    "sharp": "^0.34.2",
+    "vite": "^7.1.0"
+  }
+}
