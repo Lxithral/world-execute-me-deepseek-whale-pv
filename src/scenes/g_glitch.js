@@ -9,7 +9,10 @@ import { clamp, span, smoothstep, TAU, outCubic, inOutCubic, outElastic } from '
 import { hash01 } from '../core/rng.js'
 import { MONO, panel, toggle, roundRect } from '../ui/dsh.js'
 
-const FLIPS = [88.8, 90.3, 95.8, 97.7]
+// 四次开关翻转（FIX §3 段 G）的时刻由锚点表给出 —— 见 render 里的 flipsAt()。
+// 句子时间优先于 DIRECTOR 的绝对秒数（§2.2）。
+const FLIP_KEYS = ['flip1', 'flip2', 'flip3', 'flip4']
+const FLIP_FALLBACK = [88.8, 90.3, 95.8, 97.7]
 
 export default {
   id: 'G',
@@ -27,10 +30,15 @@ export default {
     { t: 103.4, kind: 'flash', amount: 1.0, dur: 0.3 },
   ],
 
+  /** 四次翻转的时刻（每帧从锚点表读取，纯函数） */
+  flipTimes(ctx) {
+    return FLIP_KEYS.map((k, i) => (ctx && ctx.cues ? ctx.cues.sec('G', k, FLIP_FALLBACK[i]) : FLIP_FALLBACK[i]))
+  },
+
   /** 开关次数（0→A，奇数→B） */
-  flipsAt(t) {
+  flipsAt(t, ctx) {
     let n = 0
-    for (const f of FLIPS) if (t >= f) n++
+    for (const f of this.flipTimes(ctx)) if (t >= f) n++
     return n
   },
 
@@ -40,8 +48,10 @@ export default {
     const collapse = span(t, 103.3, 103.5)
 
     // 背景：深蓝量子段
-    g.fillStyle = mixHex(C.bg0, '#050b1c', haze)
-    g.fillRect(0, 0, W, H)
+    if (!ctx.bgIs3d) {
+      g.fillStyle = mixHex(C.bg0, '#050b1c', haze)
+      g.fillRect(0, 0, W, H)
+    }
     if (haze > 0.01) {
       const rg = g.createRadialGradient(W / 2, H * 0.46, 20, W / 2, H * 0.46, H * 1.05)
       rg.addColorStop(0, rgba('#1b3a7a', 0.45 * haze))
@@ -51,26 +61,28 @@ export default {
       g.fillRect(0, 0, W, H)
       drawWavePackets(g, ctx, t, haze)
       drawRadialSpiral(g, ctx, t, haze)
-    } else {
+    } else if (!ctx.bgIs3d) {
       g.fillStyle = C.bg1
       for (let x = 0; x < W; x += 8) g.fillRect(x, 0, 4, H)
     }
 
     // ---- 抽象开关面板 ----
-    drawSwitchPanel(g, ctx, t, this.flipsAt(t))
+    drawSwitchPanel(g, ctx, t, this.flipsAt(t, ctx))
 
     // ---- 1:32.1 窗口四散（自由） ----
     const scatter = span(t, 92.1, 93.1) * (1 - span(t, 94.6, 95.6))
     if (scatter > 0.01) drawScatteredWindows(g, ctx, t, scatter)
 
     // ---- 1:34.1 昼夜表盘飞转 ----
-    const dial = span(t, 94.1, 94.7) * (1 - span(t, 96.2, 97.0))
+    const tAm = ctx.cues.sec('G', 'am', 94.1)
+    const tPm = ctx.cues.sec('G', 'pm', 95.243)
+    const dial = span(t, tAm - 0.2, tAm + 0.4) * (1 - span(t, tPm + 0.9, tPm + 1.7))
     if (dial > 0.01) drawDayNightDial(g, ctx, dial, t)
 
     // ---- 立绘：A/B 叠加（RGB 偏移交替闪现）→ 坍缩为一亮点 ----
     const ghost = span(t, 99.6, 100.4)
     const spriteA = 1 - span(t, 103.25, 103.45)
-    const showB = this.flipsAt(t) % 2 === 1
+    const showB = this.flipsAt(t, ctx) % 2 === 1
     if (t < 103.3) {
       if (ghost > 0.01) {
         // 两个她同时在场：A（鲸鱼人设 / shy）与 B（默认助手 / neutral），

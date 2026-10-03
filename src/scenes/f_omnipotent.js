@@ -9,14 +9,14 @@
 import { C, rgba, mixHex } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic, outElastic, inOutCubic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
-import { MONO, panel, bubble, roundRect, wrapText } from '../ui/dsh.js'
+import { MONO, panel, roundRect, wrapText } from '../ui/dsh.js'
 import { typed, cursorOn } from '../ui/typing.js'
-import { USER_LINES } from '../lib/code.js'
 import { assetImg } from '../whale/sprite.js'
 
 const SYS_LINES = [
   'SYSTEM',
-  '  role: the only god',
+  // 用词刻意与歌词错开（§6：歌词原文只能出现在歌词层；tools/lyric_leak_check.mjs 把关）
+  '  role: sole authority',
   '  worship: accepted',
   '  anchor: you',
 ]
@@ -45,34 +45,36 @@ export default {
     }
 
     // 背景
-    const phase = t < 77.7 ? 'eggplant' : t < 81.4 ? 'tomato' : t < 85.1 ? 'cat' : 'god'
+    // 词锚点（FIX §2.2）：四次变身各卡一个词
+    const tTomato = ctx.cues.sec('F', 'tomato', 77.7)
+    const tCat = ctx.cues.sec('F', 'cat', 81.4)
+    const tGod = ctx.cues.sec('F', 'god', 85.1)
+    const phase = t < tTomato ? 'eggplant' : t < tCat ? 'tomato' : t < tGod ? 'cat' : 'god'
     const bgTint = phase === 'eggplant' ? '#1d1330' : phase === 'tomato' ? '#2a1414' : phase === 'cat' ? '#1a1a22' : '#241d0e'
-    g.fillStyle = mixHex(C.bg0, bgTint, 0.75)
-    g.fillRect(0, 0, W, H)
-    g.fillStyle = C.bg1
-    for (let x = 0; x < W; x += 8) g.fillRect(x, 0, 4, H)
+    if (!ctx.bgIs3d) {
+      g.fillStyle = mixHex(C.bg0, bgTint, 0.75)
+      g.fillRect(0, 0, W, H)
+      g.fillStyle = C.bg1
+      for (let x = 0; x < W; x += 8) g.fillRect(x, 0, 4, H)
+    }
 
     // 对话窗口 + 用户气泡
-    drawChat(g, ctx, t)
 
     // 变身贴纸 + 指标条
+    //
+    // ⚠️ FIX_V4 §2.2：「**未获 ✅ 的模型不得出现在影片里,先放占位**」，
+    // 且 §1.7 要求茄子/番茄（以及猫）先走 `?props` 页面由**用户**审批。
+    // 所以这三拍现在一律画**占位**：原来的 `drawEggplant()` / `drawTomato()` 与
+    // `cat.png` 素材都属于"未获 ✅ 的模型"，已按规则撤下。
+    // 两个都拿到用户 ✅ 之后，再把真正的模型接回来（`drawEggplant` 等函数仍保留在文件里备用）。
     if (phase === 'eggplant') {
-      drawEggplant(g, ctx, t)
+      drawModelPlaceholder(g, ctx, t, 'eggplant')
       drawMetric(g, ctx, t, 'nutrition', 77.7, 0.35 + 0.6 * span(t, 74.6, 77.2), '#9b6fe0')
     } else if (phase === 'tomato') {
-      drawTomato(g, ctx, t)
+      drawModelPlaceholder(g, ctx, t, 'tomato')
       drawMetric(g, ctx, t, 'antioxidant', 81.4, 0.3 + 0.65 * span(t, 78.3, 80.9), '#e06f6f')
     } else if (phase === 'cat') {
-      const img = assetImg('cat.png')
-      const pop = outElastic(clamp(span(t, 81.4, 82.1)))
-      if (img) {
-        const s = 190 * pop
-        g.save()
-        g.globalAlpha = 0.95
-        g.imageSmoothingEnabled = false
-        g.drawImage(img, W * 0.34 - s / 2, H * 0.30, s, s * (img.height / img.width))
-        g.restore()
-      }
+      drawModelPlaceholder(g, ctx, t, 'cat')
       if (purr > 0.01) {
         g.save()
         g.globalAlpha = purr * 0.5
@@ -103,38 +105,52 @@ export default {
   },
 }
 
-/* ---------------- 对话窗口 ---------------- */
-function drawChat(g, ctx, t) {
+/* ---------------- 扁平贴纸 ---------------- */
+/**
+ * 占位（FIX_V4 §2.2）：茄子 / 番茄 / 猫 在用户于 `docs/PROPS_APPROVAL.md` 手写 ✅ 之前
+ * **不得出现在影片里**。这里画一个中性的"待定模型"轮廓：旋转线框剪影 + 扫描线，不带任何文字
+ * （§0.2：画面上不得出现任何标签或调试名）。它刻意**不像**任何成品模型，
+ * 免得被误当成"已经做好了"。
+ * @param {'eggplant'|'tomato'|'cat'} phase
+ */
+function drawModelPlaceholder(g, ctx, t, phase) {
   const { W, H } = ctx
-  const a = span(t, 74.0, 74.6) * (1 - span(t, 86.9, 87.8))
-  if (a <= 0.01) return
-  const x = W * 0.06
-  const y = H * 0.12
-  const w = W * 0.32
-  const h = H * 0.66
+  const cx = W * 0.34
+  const cy = H * 0.46
+  const a = clamp(span(t, 0, 0.001))
   g.save()
-  g.globalAlpha = a
-  panel(g, x, y, w, h, { title: 'chat · session #001' })
-  const cues = [74.0, 77.7, 81.4, 85.1]
-  let cy = y + 44
-  for (let i = 0; i < cues.length; i++) {
-    if (t < cues[i]) break
-    const text = typed(USER_LINES[i], t, { start: cues[i] + 0.15, cps: 26, seed: i * 13 + 3 })
-    const bh = bubble(g, { x: x + w - 18, y: cy, w: w - 44, text, me: true, alpha: 1, font: 14 })
-    cy += bh + 12
+  g.globalAlpha = 0.9
+  g.strokeStyle = rgba(C.fgDim, 0.55)
+  g.lineWidth = 3
+  // 12 条经线（旋转）：只是"一个待定的回转体"，不是任何具体物件
+  const spin = t * 0.45
+  for (let i = 0; i < 12; i++) {
+    const u = i / 12
+    const rx = Math.abs(Math.cos(spin + u * Math.PI)) * 150 + 8
+    g.beginPath()
+    g.ellipse(cx, cy, rx, 190, 0, 0, TAU)
+    g.stroke()
   }
-  // 她的回答（流式，原创）
-  if (t > 75.2) {
-    const reply = t < 77.7 ? 'as you say. i can be that.' : t < 81.4 ? 'red now. shorter.' : t < 85.1 ? 'mrrp.' : 'then i am the only one you can call.'
-    const s = typed(reply, t, { start: 75.2 + 0, cps: 20, seed: 5 })
-    bubble(g, { x: x + 18, y: cy, w: w - 44, text: s || '…', me: false, alpha: 1, font: 14 })
+  // 5 条纬线
+  for (let k = -2; k <= 2; k++) {
+    const ry = 190 * (k / 2.6)
+    const rw = 150 * Math.sqrt(Math.max(0.02, 1 - (k / 2.6) ** 2))
+    g.beginPath()
+    g.ellipse(cx, cy + ry, rw, rw * 0.22, 0, 0, TAU)
+    g.stroke()
   }
+  // 扫描线：明确"还没定稿"
+  const sy = cy - 200 + ((t * 260) % 400)
+  g.strokeStyle = rgba(C.amber, 0.75)
+  g.lineWidth = 2
+  g.beginPath()
+  g.moveTo(cx - 190, sy)
+  g.lineTo(cx + 190, sy)
+  g.stroke()
   g.restore()
 }
 
-/* ---------------- 扁平贴纸 ---------------- */
-function drawEggplant(g, ctx, t) {
-  const { W, H } = ctx
+function drawEggplant(g, ctx, t) {  const { W, H } = ctx
   const pop = outElastic(clamp(span(t, 74.4, 75.2)))
   const s = 150 * pop
   const cx = W * 0.34

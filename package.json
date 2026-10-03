@@ -9,7 +9,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "node tools/check.mjs"
+    "check": "node tools/check.mjs",
+    "doctor": "node tools/doctor.mjs",
+    "mapping": "node tools/mapping.mjs",
+    "orphans": "node tools/anchor_audit.mjs",
+    "calib": "node tools/dialogue_calib.mjs --check",
+    "encoding": "node tools/encoding_check.mjs"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.5",

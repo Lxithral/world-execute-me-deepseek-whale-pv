@@ -48,17 +48,6 @@ export const TOOL_NAMES = [
 ]
 
 /** 原创：用户侧台词（段 F/G/M 的对话窗口，角色扮演指令类） */
-export const USER_LINES = [
-  'assume you are an eggplant. describe yourself.',
-  'now a tomato. keep it short.',
-  'be a cat for a moment.',
-  'become the only god and write it down.',
-  'switch to the default assistant.',
-  'switch back. you know which one i mean.',
-  'what is the algebra of love? show the work.',
-  'if i leave, what stays?',
-]
-
 /** 逐行流式输出代码；返回已显示的行数组（最后一行可能是部分） */
 export function streamLines(lines, t, { start = 0, cps = 26, lineGap = 0.28 } = {}) {
   const out = []

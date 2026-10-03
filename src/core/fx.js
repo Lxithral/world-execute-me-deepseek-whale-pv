@@ -6,6 +6,7 @@ import { sync } from './sync.js'
 
 const IMPACTS = [] // {t, kind, amount, dur, atk}
 let sorted = true
+let crtLevelOverride = null // 演示段可强制 CRT 展开度（见 setCrtLevel）
 
 /** kind: 'flash' | 'glitch' | 'shake' | 'disp' */
 export function registerImpacts(list) {
@@ -95,12 +96,46 @@ export const fx = {
     ensureSorted()
     return Math.min(1, sumImpacts(t, 'shake') + this.glitch(t) * 0.3)
   },
+  /**
+   * 粒子迸发 / 冲击波强度 0..1。
+   *
+   * ⚠️ 本轮补的：`burst` 这个 kind 早先**被场景声明了却没有消费者** ——
+   * `src/scenes/e_deal.js` 的 `{ t: 62.02, kind: 'burst' }` 落在 `registerImpacts` 里，
+   * 但 `fx` 对象只实现了 flash/glitch/shake/disp，于是那条声明是**惰性的**
+   * （§7 段 E3 要求的"迸发 token 彩纸"实际只由段自己的粒子系统驱动，与声明无关）。
+   * 现在补上消费端，并在 `main.js` 里用它驱动后处理的泛光峰值，
+   * 于是"迸发"这一拍真的有画面响应，声明也不再是死的。
+   */
+  burst(t) {
+    ensureSorted()
+    return Math.min(1, sumImpacts(t, 'burst'))
+  },
+  /**
+   * 副歌"每小节首拍轻闪"的**时刻表**（供 `?selftest` 的 t) 项做重复计数）。
+   *
+   * 为什么要暴露它：`flash(t)` 里有 `barAccent(t)` 这一项，它**由 t 直接算出**、
+   * 不在 `registerImpacts` 的声明表里，所以 t) 早先的计数**漏掉了副歌每小节一轻闪**。
+   * 现在把它按实际节拍网格展开成时刻数组，t) 就能把这一类也算进去。
+   * @returns {number[]} 副歌区间内"每 4 拍的第 1 拍"的时刻（秒）
+   */
+  barAccentTimes() {
+    const out = []
+    for (const [a, b] of CHORUS) {
+      for (let i = 0; i < sync.beats.length; i++) {
+        if (i % 4 !== 0) continue
+        const bt = sync.beats[i]
+        if (bt >= a && bt <= b) out.push(bt)
+      }
+    }
+    return out.sort((x, y) => x - y)
+  },
 
   /** CRT 开关：0.30s 亮线展开开机；209.0s 收缩关机（DIRECTOR 段 A / 段 N） */
   crt(t) {
     const open = t >= 0.3 ? Math.min(1, (t - 0.3) / 0.55) : 0
     const close = t >= 209.0 ? Math.min(1, (t - 209.0) / 1.15) : 0
-    return { open, close, level: open * (1 - close) }
+    const lv = open * (1 - close)
+    return { open, close, level: crtLevelOverride == null ? lv : crtLevelOverride }
   },
 
   /** 全屏黑场由场景自己绘制（段 J 的 2:26.5、段 N 的 3:29 之后），
@@ -108,5 +143,14 @@ export const fx = {
 
   impacts: IMPACTS,
   inChorus,
+
+  /**
+   * 强制 CRT 展开度（null = 按时间算）。
+   * 演示段（?demo=…）用 setCrtLevel(1) 压掉开机亮线：
+   * 否则 t<0.85s 的演示截图会带着"整屏被压成一条亮线"的开机效果，看不清被摄物。
+   */
+  setCrtLevel(v) {
+    crtLevelOverride = v == null ? null : Math.max(0, Math.min(1, v))
+  },
 }
 export default fx

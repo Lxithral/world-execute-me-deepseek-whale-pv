@@ -10,6 +10,8 @@ import { clamp, span, smoothstep, TAU, outCubic, inOutCubic, outElastic } from '
 import { hash01 } from '../core/rng.js'
 import { MONO, panel, handoffCard, nestedWindow, bootLog, roundRect, ctxAt } from '../ui/dsh.js'
 import { typed, cursorOn } from '../ui/typing.js'
+import * as THREE from 'three'
+import { createHeartParticles, screenFracToWorldX } from '../lib/heart3d.js'
 
 const TYPED = 'world.execute(me);'
 const LOG = [
@@ -33,6 +35,20 @@ export default {
     { t: 209.0, kind: 'glitch', amount: 0.3, dur: 0.2 },
   ],
 
+  init(ctx) {
+    /* ---- T07 / FIX_V4 §1.14：蓝色粒子爱心（与段 M 共用同一份 `src/lib/heart3d.js`）----
+     * 旧实现是 `drawHeart()`（2D 画的心）+ 一行 `heartbeat N bpm` 读数；
+     * §1.14 明写「**删除右侧红色爱心及其标注**（如 heartbeat 读数）」→ 两者都撤掉，
+     * 换成 **22000 粒**（外层壳 20000 + 白热核心 2000）的加法混合粒子心。
+     * §1.14 的其余要求（白热光芯 / 心跳放射状冲击波环，峰值青→白 / 轮廓发光管 / 外围火花粒子 /
+     * 缓慢自转）全部在 heart3d.js 里实现，两段共用。
+     * 位置放在**画面中央**（0.5）：T09 的规则"交接卡片不得进入爱心中心半径
+     * （爱心中心为圆心、画面高度 28% 为半径）"里的圆心就是这里。
+     */
+    this.heart = createHeartParticles(THREE, { count: 20000, coreCount: 2000, sparkCount: 900, scale: 0.72 })
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.heart.object)
+  },
+
   render(t, lt, ctx) {
     const { g, W, H, sync } = ctx
     // 心跳：交接后变慢
@@ -45,20 +61,40 @@ export default {
     const crtOff = span(t, 209.0, 209.3)
 
     // ---- 底色 ----
-    g.fillStyle = freeze > 0.5 ? C.bg0 : '#0b0a10'
-    g.fillRect(0, 0, W, H)
-    if (freeze > 0.5) {
-      // 定格 = 与段 A 相同的开机构图（竖条纹）
-      g.fillStyle = C.bg1
-      for (let x = 0; x < W; x += 8) g.fillRect(x, 0, 4, H)
+    if (!ctx.bgIs3d) {
+      g.fillStyle = freeze > 0.5 ? C.bg0 : '#0b0a10'
+      g.fillRect(0, 0, W, H)
+      if (freeze > 0.5) {
+        // 定格 = 与段 A 相同的开机构图（竖条纹）
+        g.fillStyle = C.bg1
+        for (let x = 0; x < W; x += 8) g.fillRect(x, 0, 4, H)
+      }
     }
 
     // ---- 心脏（延续段 M），随拍跳动 ----
     const heartA = 1 - span(t, 205.4, 205.96) * 0.85
-    if (heartA > 0.01 && freeze < 0.5) drawHeart(g, ctx, t, heartA, beatPulse, bpm)
+    // T07 / §1.14：3D 粒子爱心取代原来的 2D `drawHeart`
+    {
+      const cam = ctx.three.camera
+      const dist = 3.0
+      const hx = screenFracToWorldX(cam, 0.5, dist)
+      this.heart.object.position.set(cam.position.x + hx, cam.position.y - 0.02, cam.position.z - dist)
+      this.heart.update(t, {
+        // 冻结帧（206.0 起）按 DIRECTOR 要回到"段 A 开机构图"，那时不显示爱心
+        alpha: freeze < 0.5 ? heartA : 0,
+        beat: beatPulse,
+        s: 0.9 + 0.1 * heartA,
+        spin: 0.22,
+      })
+      this.metrics = this.metrics || {}
+      this.metrics.heartPoints = 22000
+      this.metrics.heartBeat = +beatPulse.toFixed(2)
+    }
 
     // ---- 3:10.8 交接卡片 ----
-    const cardA = span(t, 190.8, 191.4) * (1 - span(t, 193.4, 194.2))
+    // 词锚点：交接卡片的时刻（DIRECTOR 3:10.8 与 anchors.js 的 N.handoff 一致）
+    const tHandoff = ctx.cues.sec('N', 'handoff', 190.8)
+    const cardA = span(t, tHandoff, tHandoff + 0.6) * (1 - span(t, tHandoff + 2.6, tHandoff + 3.4))
     if (cardA > 0.01) {
       handoffCard(g, { x: W * 0.32, y: H * 0.20, w: 640, alpha: cardA, pct: ctxAt(190.8), t })
     }
@@ -115,7 +151,13 @@ export default {
   },
 }
 
-/* ---------------- 心脏 ---------------- */
+/* ---------------- 心脏（⚠️ T07 已撤用：见下方说明） ----------------
+ * ⚠️ T07 / FIX_V4 §1.14：「**删除右侧红色爱心及其标注（如 heartbeat 读数）**」。
+ * 段 N 现在用的是 `src/lib/heart3d.js` 的蓝色 3D 粒子爱心（22000 粒、加法混合、白热核心、
+ * 心跳冲击波环、轮廓发光管、火花粒子），与段 M 共用同一份实现。
+ * 下面这个 2D `drawHeart()` 已**不再被调用**（含那行 `heartbeat N bpm` 读数）；
+ * 保留函数体只是留作记录，**下次清理时整块删除**。任何情况下都不要把它接回画面。
+ */
 function drawHeart(g, ctx, t, a, beat, bpm) {
   const { W, H } = ctx
   const cx = W * 0.72
@@ -286,7 +328,7 @@ function drawFinalExecution(g, ctx, t) {
   g.textAlign = 'left'
   g.textBaseline = 'middle'
   g.fillText('>', bx + 14, by + 24)
-  const s = typed(TYPED, t, { start: 205.5, cps: 46, jitter: 0.1, seed: 8 })
+  const s = typed(TYPED, t, { start: ctx.cues.sec('N', 'lastExec', 205.5) - 0.46, cps: 46, jitter: 0.1, seed: 8 })
   g.fillStyle = C.fg
   g.fillText(s, bx + 40, by + 24)
   if (s.length < TYPED.length && cursorOn(t, { hz: 1.4 })) {

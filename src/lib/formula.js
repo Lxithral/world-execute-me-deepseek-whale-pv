@@ -26,7 +26,17 @@ export const FORMULAS = {
  */
 export function drawMath(g, x, y, text, size = 22, { color = C.fg, alpha = 1, align = 'left' } = {}) {
   g.save()
-  g.globalAlpha = alpha
+  // ⚠️ 必须**乘**、不能**赋值**。
+  // 原实现是 `g.globalAlpha = alpha`（绝对赋值，默认 1），于是它会**清掉调用方设好的透明度**：
+  //   `src/scenes/l_training.js` 的 `drawBangFormulas()` 先算
+  //   `g.globalAlpha = (1-u)*0.8*(1-span(t,169.0,170.2))`（本意是让爆散的公式淡出），
+  //   紧接着调用 `drawMath(...)` 且没传 `alpha` → 透明度被重置成 1 →
+  //   **那 21 条公式从 166.3s 起以满不透明度一直画下去、永不淡出**。
+  // 后果实测（`?selftest` r)）：段 L 的 174.0/174.5/175.0s 单帧登记 **1124 个文字盒**、
+  // 报出 214/95/88 处同层重叠 —— 爆散公式压在后来的"公式球"与"三棱镜"上，
+  // 正是 §2.8 要抓的"文字叠成一团"。同一个问题也影响 `drawFormulaBall()`（它同样先设 alpha 再调本函数）。
+  // 改成 `*=` 之后，`g.save()/g.restore()` 仍然保证不泄漏到调用方之外。
+  g.globalAlpha *= alpha
   g.textBaseline = 'alphabetic'
   g.textAlign = 'left'
   const seg = []

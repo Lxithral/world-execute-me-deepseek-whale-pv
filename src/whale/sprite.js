@@ -4,7 +4,7 @@
 
 import { hash01 } from '../core/rng.js'
 import { clamp, span } from '../core/ease.js'
-import { ROLES, FILES, XFADE } from './exprs.js'
+import { SOURCE, hasRole, ROLE_NAMES } from './exprs.js'
 
 const cache = new Map() // name -> {img, tile}
 // 变体缓存：去色用像素处理（保留 alpha，绝不给透明区上色），着色用 source-atop 蒙版。
@@ -74,12 +74,15 @@ function variant(name, desat = 0, tint = null, tintAmt = 1) {
   return src
 }
 
-/** 载入后预热所有角色的变体，避免渲染路径上出现一次性开销 */
+/** 预热某个角色的一种变体（去色 + 着色）：供 cast.js 的出场表在启动时全部建好 */
+export function prewarmRole(role, desat = 0, tint = null, tintAmt = 1) {
+  const file = SOURCE[role]
+  return file ? variant(file, desat, tint, tintAmt) : null
+}
+
+/** 载入后预热全部 9 个角色的变体（去色/着色），避免渲染路径上出现一次性开销 */
 function prewarm() {
-  for (const role of Object.keys(ROLES)) {
-    const s = ROLES[role]
-    variant(s.file, s.desat || 0, s.tint || null, s.tintAmt ?? 1)
-  }
+  for (const role of ROLE_NAMES) variant(SOURCE[role], 0, null, 1)
 }
 
 function loadImage(url) {
@@ -93,7 +96,7 @@ function loadImage(url) {
 
 /** 载入全部素材，并按 3D 点云用的工作宽度做一份等比例缩略图 */
 export async function loadSprites(base = './whale/', tileW = 720) {
-  const names = [...new Set([...Object.values(FILES), 'cat.png'])]
+  const names = [...new Set([...Object.values(SOURCE), 'cat.png'])]
   await Promise.all(
     names.map(async (n) => {
       const img = await loadImage(base + n)
@@ -116,44 +119,6 @@ export const aspectOf = (name) => (cache.get(name) || { aspect: 0.5557 }).aspect
 /** 取已载入的原图（如 cat.png）；未就绪返回 null */
 export const assetImg = (name) => cache.get(name)?.img || null
 
-/** 叠加图元：闭眼睑条 / 悲伤（垂视线 + 泪滴） */
-function drawOverlay(g, overlay, r, role) {
-  const { x, y, w, h } = r
-  if (overlay === 'eyesClosed') {
-    // 两条黑色眼睑条，位置取头部（顶部 10%–22%），仅作近似的「闭眼」提示
-    g.save()
-    g.fillStyle = 'rgba(8,10,14,0.92)'
-    const ey = y + h * 0.155
-    const ew = w * 0.075
-    const eh = Math.max(2, h * 0.007)
-    g.fillRect(x + w * 0.46 - ew * 0.5, ey, ew, eh)
-    g.fillRect(x + w * 0.60 - ew * 0.5, ey, ew, eh)
-    g.restore()
-  } else if (overlay === 'sad') {
-    g.save()
-    // 垂视线：两道浅色斜线
-    g.strokeStyle = 'rgba(220,228,240,0.5)'
-    g.lineWidth = Math.max(1.5, h * 0.003)
-    const ey = y + h * 0.155
-    for (const dx of [0.46, 0.60]) {
-      g.beginPath()
-      g.moveTo(x + w * dx - w * 0.02, ey + h * 0.006)
-      g.lineTo(x + w * dx + w * 0.02, ey - h * 0.002)
-      g.stroke()
-    }
-    // 泪滴
-    const tx = x + w * 0.455
-    const ty = y + h * 0.185
-    g.fillStyle = 'rgba(150,220,255,0.85)'
-    g.beginPath()
-    g.moveTo(tx, ty)
-    g.quadraticCurveTo(tx + w * 0.022, ty + h * 0.028, tx, ty + h * 0.045)
-    g.quadraticCurveTo(tx - w * 0.022, ty + h * 0.028, tx, ty)
-    g.fill()
-    g.restore()
-  }
-}
-
 /**
  * 站位（galgame 式，SPEC §4.4）：
  * 立绘底部锚定、头部在画面顶部 12–20%、横向默认 x∈[58%,92%]、膝以下没入歌词区渐变。
@@ -168,7 +133,10 @@ export function standRect(W, H, { cxFrac = 0.75, topFrac = 0.15, heightFrac = 1.
 /**
  * drawSprite(g, t, opts)
  * opts: {expr, x, y, scale=1, alpha=1, tint, tintAmt, desat, glitch=0, anchor='bottom-center', rect}
- * expr 可为角色名，或 {from,to,p}（用 exprAt 得到）。
+ *
+ * `expr` 只接受**角色名**（= 素材名，见 exprs.js 的 9 个 SOURCE key）。
+ * FIX.md §5.1：不做交叉淡化 —— 姿态不同的整身立绘淡化会露出两个身体叠在一起，
+ * 切换一律硬切（由调用方在切换的那两帧叠加一帧色散 + 一次小冲击）。
  */
 export function drawSprite(g, t, opts = {}) {
   const {
@@ -185,21 +153,12 @@ export function drawSprite(g, t, opts = {}) {
     flip = false,
   } = opts
 
-  let from = 'neutral'
-  let to = 'neutral'
-  let p = 1
-  const e = opts.expr
-  if (typeof e === 'string') {
-    from = to = e
-  } else if (e && typeof e === 'object') {
-    from = e.from
-    to = e.to
-    p = clamp(e.p)
-  }
+  // 硬切：只取当前角色
+  let role = typeof opts.expr === 'string' ? opts.expr : 'base'
+  if (!hasRole(role)) role = 'base'
+  const spec = SOURCE
 
-  const sFrom = ROLES[from] || ROLES.neutral
-  const sTo = ROLES[to] || ROLES.neutral
-  const base = cache.get(FILES.base)
+  const base = cache.get(SOURCE.base)
   const aspect = base ? base.aspect : 0.5557
 
   // 尺寸：优先 rect（逻辑像素），否则按 scale 相对画面高度的倍数
@@ -242,20 +201,11 @@ export function drawSprite(g, t, opts = {}) {
   }
   g.imageSmoothingQuality = 'high'
 
-  const tileOf = (spec) =>
-    variant(
-      spec.file,
-      Math.max(spec.desat || 0, desatOpt),
-      tint || spec.tint || null,
-      tintAmt * (spec.tintAmt ?? 1)
-    )
+  const tileFor = () => variant(SOURCE[role], desatOpt, tint, tintAmt)
 
-  const drawOne = (spec, a) => {
-    const cv = tileOf(spec)
-    if (!cv) return
-    if (a <= 0) return
+  const cv = tileFor()
+  if (cv) {
     const slice = glitch > 0.25 ? Math.floor(hash01(gi, 21) * 4) : -1
-    g.globalAlpha = alpha * a
     if (slice >= 0) {
       // 把立绘横向切成 4 段，随机一段水平错位
       const sh = h / 4
@@ -269,18 +219,5 @@ export function drawSprite(g, t, opts = {}) {
       g.drawImage(cv, 0, 0, w, h)
     }
   }
-
-  if (p >= 1 || from === to) {
-    drawOne(sTo, 1)
-    if (sTo.overlay) drawOverlay(g, sTo.overlay, { x: 0, y: 0, w, h }, to)
-  } else {
-    drawOne(sFrom, 1 - p)
-    drawOne(sTo, p)
-    if (p > 0.5 && sTo.overlay) drawOverlay(g, sTo.overlay, { x: 0, y: 0, w, h }, to)
-  }
   g.restore()
 }
-
-/** 调试/自检用：某角色是否可用 */
-export const hasRole = (role) => !!ROLES[role]
-export { XFADE }

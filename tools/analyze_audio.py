@@ -16,6 +16,7 @@ tools/analyze_audio.py  ->  public/data/analysis.json
 import json
 import math
 import os
+import shutil
 import sys
 
 import numpy as np
@@ -29,8 +30,10 @@ except Exception as exc:  # pragma: no cover
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-# 优先无损 FLAC，回退 MP3；两者对齐一致（实测均 211.907s）
-CANDIDATES = [os.path.join(ROOT, "assets", "song.flac"), os.path.join(ROOT, "assets", "song.mp3")]
+# FIX.md §5.2：分析与播放一律用 assets/song.mp3（参考仓库那份，211.907s，与 FLAC 差 <1ms）。
+# FLAC 只作备份，不复制进 public/，因此不会进 dist/。dist 目标 <15MB。
+CANDIDATES = [os.path.join(ROOT, "assets", "song.mp3"), os.path.join(ROOT, "assets", "song.flac")]
+PUB_AUDIO = os.path.join(ROOT, "public", "audio")
 OUT = os.path.join(ROOT, "public", "data", "analysis.json")
 
 FPS = 30
@@ -151,6 +154,17 @@ def main():
             "data": flat,
         },
     }
+
+    # 把播放用的 mp3 复制到 public/audio/（该目录在 .gitignore 中；FLAC 不复制）
+    if os.path.basename(SONG).lower().endswith(".mp3"):
+        os.makedirs(PUB_AUDIO, exist_ok=True)
+        shutil.copyfile(SONG, os.path.join(PUB_AUDIO, "song.mp3"))
+        print("  playback   public/audio/song.mp3  (%.1f MB)" % (os.path.getsize(SONG) / 1024 / 1024))
+    else:
+        sys.stderr.write(
+            "警告：正在用 %s 分析，但它不会被复制到 public/audio/（FIX §5.2 要求播放 mp3）\n"
+            % os.path.basename(SONG)
+        )
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as fh:

@@ -1,0 +1,393 @@
+/* 品牌字：官方 ui-theme 随包分发的 Montserrat（OFL，见 public/dsh/fonts/Montserrat-OFL.txt）。
+   用户 F2a 第 8 条：品牌字必须用官方那一支，而不是系统无衬线 fallback。 */
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/dsh/fonts/montserrat-regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/dsh/fonts/montserrat-medium.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/dsh/fonts/montserrat-light.woff2') format('woff2');
+  font-weight: 300;
+  font-display: swap;
+}
+
+/* src/ui/dsh.css — dsh 界面层的真实 HTML/CSS（FIX.md §2.3 + 用户 F2a 反馈）
+ *
+ * token 全部抄自官方 packages/client/ui-theme/src/styles/{base,design-platform}.css
+ * （见 docs/DSH_UI_NOTES.md 的 b 节），亮/暗两套由 #dsh-layer[data-ds-dark-theme] 切换。
+ *
+ * 面板是**半透明玻璃**：背景模糊 + 0.5px 描边，不是实心矩形（用户第 2 条）。
+ * 面板动画（enter/exit/shake/glitch/grayscale/smash/tunnel/collapse）由 src/ui/panels.js
+ * 以**进度驱动**写成内联 style，所以这里**不设** transform/filter/opacity，
+ * 也不设窗口尺寸（几何由 JS 按安全区算好写内联）。
+ *
+ * 安全区：聊天窗底边不越过 84% 画面高（歌词占底部 16%），高度 ≤76%。
+ */
+
+/* token 与布局的作用域是**类**（不是 id），这样 ?dshpreview 能同时挂亮/暗两棵树 */
+.dsh-root {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  perspective: 1600px;
+  perspective-origin: 50% 50%;
+  --dsh-glitch: 0;
+  --dsh-disp: 0;
+  --dsh-shake: 0;
+  --dsh-alpha: 1;
+  --dsh-glass: 72%;
+}
+
+/* 影片里的这一份：钉在视口上，且不接管鼠标（歌词在它上面） */
+#dsh-layer {
+  position: fixed;
+  z-index: 5; /* 低于歌词画布 #lyrics 的 30：歌词永远最上层 */
+  pointer-events: none;
+}
+
+#dsh-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1920px;
+  height: 1080px;
+  transform-origin: 0 0;
+  opacity: var(--dsh-alpha);
+}
+
+/* ---------------- token：亮色（默认） ---------------- */
+.dsh-root {
+  --dsw-alias-bg-base: rgb(255, 255, 255);
+  --dsw-alias-bg-layer-1: rgb(255, 255, 255);
+  --dsw-alias-bg-layer-2: rgb(255, 255, 255);
+  --dsw-alias-border-l1: rgba(0, 0, 0, 0.04);
+  --dsw-alias-border-l2: rgba(0, 0, 0, 0.1);
+  --dsw-alias-border-l3: rgba(0, 0, 0, 0.12);
+  --dsw-alias-border-l4: rgba(0, 0, 0, 0.16);
+  --dsw-alias-label-primary: rgb(15, 17, 21);
+  --dsw-alias-label-secondary: rgb(97, 102, 107);
+  --dsw-alias-label-tertiary: rgb(129, 133, 140);
+  --dsw-alias-label-shimmer: rgba(0, 0, 0, 0.3);
+  --dsw-alias-button-primary-fill: rgb(15, 17, 21);
+  --dsw-alias-button-info-fill: rgb(65, 118, 230);
+  --dsw-alias-state-business-primary: rgb(65, 118, 230);
+  --dsw-alias-state-error-primary: rgb(236, 19, 19);
+  --dsw-alias-state-success-primary: rgb(34, 197, 94);
+  --dsw-alias-state-warn-primary: rgb(245, 158, 11);
+  --dsw-alias-state-warn-label: rgb(221, 134, 41);
+  --dsw-alias-state-warn-secondary: rgb(247, 173, 49);
+  --dsw-alias-state-warn-tertiary: rgb(254, 245, 231);
+  --dsw-alias-state-success-tertiary: rgb(230, 250, 237);
+  --dsw-specific-bubble: rgb(237, 243, 254);
+  --dsw-specific-input-major: rgba(255, 255, 255, 0.72);
+  --dsw-specific-sidebar-fill: rgba(249, 250, 251, 0.5);
+  --dsw-specific-sidebar-nav-item-active: rgb(235, 238, 242);
+  --dsw-specific-menu: rgba(248, 249, 250, 0.94);
+  --dsw-alias-markdown-code-block: rgba(249, 250, 251, 0.7);
+  --dsw-alias-interactive-bg-hover: rgba(38, 49, 72, 0.06);
+  --dsw-radius-sm: 8px;
+  --dsw-radius-md: 12px;
+  --dsw-radius-lg: 16px;
+  --dsw-radius-xl: 20px;
+  --dsw-radius-panel: 28px;
+  --dsw-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --dsw-font-family-brand: 'Montserrat', var(--dsw-font-family);
+  --ds-font-family-code: 'JetBrains Mono', Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+  --dsw-elevation-prominent: 0 0 0 0.5px var(--dsw-alias-border-l3), 0 18px 48px rgba(0, 0, 0, 0.18);
+  --dsw-elevation-soft: 0 0 0 0.5px var(--dsw-alias-border-l2), 0 10px 28px rgba(0, 0, 0, 0.12);
+  --dsw-shadow-lv2: 0 4px 12px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------------- token：暗色 ---------------- */
+.dsh-root[data-ds-dark-theme] {
+  --dsw-alias-bg-base: rgb(21, 21, 23);
+  --dsw-alias-bg-layer-1: rgb(35, 35, 36);
+  --dsw-alias-bg-layer-2: rgb(44, 44, 46);
+  --dsw-alias-border-l1: rgba(255, 255, 255, 0.06);
+  --dsw-alias-border-l2: rgba(255, 255, 255, 0.12);
+  --dsw-alias-border-l3: rgba(255, 255, 255, 0.18);
+  --dsw-alias-border-l4: rgba(255, 255, 255, 0.22);
+  --dsw-alias-label-primary: rgb(249, 250, 251);
+  --dsw-alias-label-secondary: rgb(207, 211, 214);
+  --dsw-alias-label-tertiary: rgb(173, 178, 184);
+  --dsw-alias-label-shimmer: rgba(255, 255, 255, 0.45);
+  --dsw-alias-button-primary-fill: rgb(249, 250, 251);
+  --dsw-alias-button-info-fill: rgb(122, 170, 255);
+  --dsw-alias-state-business-primary: rgb(122, 170, 255);
+  --dsw-alias-state-error-primary: rgb(242, 90, 90);
+  --dsw-alias-state-warn-label: rgb(221, 134, 41);
+  --dsw-alias-state-warn-secondary: rgb(247, 173, 49);
+  --dsw-alias-state-warn-tertiary: rgba(39, 36, 31, 0.82);
+  --dsw-alias-state-success-tertiary: rgba(35, 60, 44, 0.82);
+  --dsw-specific-bubble: rgba(58, 58, 62, 0.78);
+  --dsw-specific-input-major: rgba(44, 44, 46, 0.66);
+  --dsw-specific-sidebar-fill: rgba(27, 27, 28, 0.42);
+  --dsw-specific-sidebar-nav-item-active: rgba(67, 69, 74, 0.85);
+  --dsw-specific-menu: rgba(48, 49, 54, 0.94);
+  --dsw-alias-markdown-code-block: rgba(27, 27, 28, 0.6);
+  --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.08);
+  /* 暗场里玻璃要更实一点才读得清（影片背景常年很暗）；仍低于"实心矩形" */
+  --dsh-glass: 74%;
+}
+
+/* ---------------- 玻璃窗口 ---------------- */
+.dsh-frame {
+  position: absolute; /* 几何（left/top/width/height）由 JS 按安全区写内联 */
+  border-radius: 22px;
+  overflow: hidden;
+  display: grid;
+  /* 三列（官方布局）：左栏 280 / 中栏 minmax(0,1fr) / 右栏轨道（官方 RIGHTBAR_MIN=300px）；
+     右栏宽度 --dsh-right-w 由 JS 写内联（调用方指定），为 0 时整列收起 */
+  grid-template-columns: 280px minmax(0, 1fr) var(--dsh-right-w, 0px);
+  /* 单行必须**填满且可收缩**：auto 行会被内容撑到 1125px（> 窗口 778px），
+     把 composer 与输入框整块顶到窗口外 */
+  grid-template-rows: minmax(0, 1fr);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family);
+  /* 玻璃质感：半透明底 + 背景模糊 + 0.5px 描边（用户第 2 条：不是实心矩形） */
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) var(--dsh-glass), transparent);
+  backdrop-filter: blur(20px) saturate(1.25);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  box-shadow: var(--dsw-elevation-prominent);
+  /* transform / opacity / filter 一律由 panels.js 写内联，这里不设 */
+}
+
+/* ---------------- 侧栏（官方 ui-sidebar 的结构：品牌 / 主导航 / 工作区树 / 底部入口） ---------------- */
+.dsh-sidebar {
+  min-height: 0; /* 网格项默认 min-height:auto 会阻止收缩 */
+  background: var(--dsw-specific-sidebar-fill);
+  border-right: 0.5px solid var(--dsw-alias-border-l2);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.dsh-brand { min-height: 52px; display: flex; align-items: center; gap: 9px; }
+.dsh-brand .mark { flex: none; color: var(--dsw-alias-label-primary); display: flex; }
+.dsh-brand .mark svg { width: 32px; height: 23.5px; }
+.dsh-brand .txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dsh-brand .name { font-family: var(--dsw-font-family-brand); font-size: 26px; font-weight: 500; letter-spacing: -0.01em; }
+.dsh-brand .ver { font-family: var(--ds-font-family-code); font-size: 18px; color: var(--dsw-alias-label-tertiary); white-space: nowrap; }
+.dsh-brand .collapse {
+  margin-left: auto; width: 26px; height: 26px; flex: none; border-radius: 6px;
+  border: 0.5px solid var(--dsw-alias-border-l3); position: relative;
+}
+.dsh-brand .collapse::before {
+  content: ''; position: absolute; left: 7px; top: 6px; width: 10px; height: 12px;
+  border-left: 1.5px solid var(--dsw-alias-label-tertiary);
+  border-top: 1.5px solid var(--dsw-alias-label-tertiary);
+  border-bottom: 1.5px solid var(--dsw-alias-label-tertiary);
+  border-radius: 2px 0 0 2px;
+}
+.dsh-nav { display: flex; flex-direction: column; gap: 4px; }
+.dsh-navitem {
+  height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 10px;
+  border-radius: var(--dsw-radius-md); font-size: 26px; color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+.dsh-navitem.primary { border: 0.5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); }
+.dsh-navitem .kb { margin-left: auto; font-family: var(--ds-font-family-code); font-size: 17px; color: var(--dsw-alias-label-tertiary); }
+.dsh-navitem .ic { width: 15px; height: 15px; flex: none; border: 1.5px solid currentColor; border-radius: 3px; opacity: 0.85; }
+.dsh-navitem .ic.skills { border-radius: 50%; }
+.dsh-navitem .ic.plugins { transform: rotate(45deg); border-radius: 2px; }
+.dsh-sectitle { display: flex; align-items: center; font-size: 22px; font-weight: 600; color: var(--dsw-alias-label-tertiary); padding: 0 4px; }
+.dsh-sectitle .tools { margin-left: auto; display: flex; gap: 5px; }
+.dsh-sectitle .tools i { width: 12px; height: 12px; border: 1.5px solid currentColor; border-radius: 3px; opacity: 0.7; }
+.dsh-tree { display: flex; flex-direction: column; gap: 3px; min-height: 0; }
+.dsh-ws { display: flex; align-items: center; gap: 8px; padding: 0 8px; height: 28px; font-size: 24px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.dsh-ws .folder { width: 14px; height: 11px; flex: none; border: 1.5px solid var(--dsw-alias-label-tertiary); border-radius: 2px; }
+.dsh-sessions { display: flex; flex-direction: column; gap: 3px; padding-left: 12px; }
+.dsh-session {
+  height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 8px;
+  border-radius: var(--dsw-radius-sm); font-size: 26px; color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+.dsh-session .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-business-primary); flex: none; }
+.dsh-session .sid { font-family: var(--ds-font-family-code); font-weight: 600; }
+.dsh-session .slabel { color: inherit; overflow: hidden; text-overflow: ellipsis; }
+.dsh-session .when { margin-left: auto; font-size: 20px; color: var(--dsw-alias-label-tertiary); }
+.dsh-session.active { background: var(--dsw-specific-sidebar-nav-item-active); color: var(--dsw-alias-label-primary); font-weight: 600; }
+.dsh-side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; }
+.dsh-footitem { height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px; font-size: 24px; color: var(--dsw-alias-label-secondary); }
+.dsh-footitem .ic { width: 13px; height: 13px; border: 1.5px solid currentColor; border-radius: 3px; opacity: 0.75; }
+.dsh-model { padding: 6px 8px 0; font-family: var(--ds-font-family-code); font-size: 20px; color: var(--dsw-alias-label-tertiary); }
+
+/* ---------------- 中栏 ---------------- */
+.dsh-center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.dsh-header {
+  min-height: 72px; padding: 10px 20px 8px 22px;
+  display: flex; align-items: center; gap: 12px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+}
+.dsh-header .meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dsh-header .title { font-size: 40px; font-weight: 600; white-space: nowrap; }
+/* 官方在顶部 banner 右侧放"打开右侧边栏"按钮 */
+.dsh-header .rail-toggle {
+  margin-left: auto; flex: none; width: 30px; height: 30px; border-radius: 7px;
+  border: 0.5px solid var(--dsw-alias-border-l3); position: relative;
+}
+.dsh-header .rail-toggle::before {
+  content: ''; position: absolute; right: 6px; top: 6px; width: 6px; height: 16px;
+  border: 1.5px solid var(--dsw-alias-label-tertiary); border-radius: 2px;
+}
+.dsh-header .sub { font-size: 30px; color: var(--dsw-alias-label-tertiary); white-space: nowrap; }
+.dsh-transcript {
+  flex: 1; min-height: 0; overflow: hidden; padding: 14px 36px 6px;
+  display: flex; flex-direction: column; gap: 12px;
+  /* 像真正滚到底的对话：最新一条贴底，旧的从顶部淡出 */
+  justify-content: flex-end;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 22px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22px);
+}
+.dsh-userrow { display: flex; justify-content: flex-end; }
+.dsh-bubble {
+  max-width: 64%; background: var(--dsw-specific-bubble); border-radius: var(--dsw-radius-xl);
+  padding: 10px 16px; font-size: 32px; line-height: 1.5; white-space: pre-wrap;
+}
+.dsh-assistant { font-size: 32px; line-height: 1.55; max-width: 80%; }
+.dsh-disclosure { height: 38px; display: flex; align-items: center; gap: 8px; font-size: 30px; color: var(--dsw-alias-label-secondary); }
+.dsh-disclosure .ico { width: 20px; height: 20px; border-radius: 50%; border: 2.5px solid var(--dsw-alias-label-tertiary); flex: none; }
+.dsh-disclosure .sum { overflow: visible; white-space: nowrap; }
+.dsh-disclosure[data-state='running'] .sum {
+  color: transparent;
+  background: linear-gradient(105deg, transparent 0%, var(--dsw-alias-label-shimmer) 40% 60%, transparent 100%);
+  background-clip: text; -webkit-background-clip: text;
+  animation: dsh-shimmer 1.5s steps(48, end) 0.3s infinite;
+}
+@keyframes dsh-shimmer { 0% { background-position: -100% 0; } 66.6667%, 100% { background-position: 100% 0; } }
+.dsh-tool {
+  border: 0.5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-markdown-code-block); padding: 9px 15px;
+  display: flex; flex-direction: column; gap: 6px; max-width: 80%;
+}
+.dsh-tool .row1 { display: flex; align-items: center; gap: 10px; font-size: 30px; }
+.dsh-tool .name { font-family: var(--ds-font-family-code); font-weight: 600; }
+.dsh-tool .state { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+.dsh-tool[data-state='running'] .state { background: var(--dsw-alias-state-warn-primary); }
+.dsh-tool[data-state='ok'] .state { background: var(--dsw-alias-state-success-primary); }
+.dsh-tool[data-state='error'] .state { background: var(--dsw-alias-state-error-primary); }
+.dsh-tool .args, .dsh-tool .out { font-family: var(--ds-font-family-code); font-size: 24px; color: var(--dsw-alias-label-secondary); }
+.dsh-tool .out { border-top: 0.5px solid var(--dsw-alias-border-l2); padding-top: 6px; }
+.dsh-notice { border-radius: var(--dsw-radius-lg); padding: 10px 16px; font-size: 30px; display: flex; align-items: center; gap: 10px; max-width: 80%; }
+.dsh-notice.warn { background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); }
+.dsh-notice.err { background: rgba(236, 19, 19, 0.14); color: var(--dsw-alias-state-error-primary); }
+.dsh-notice.handoff { background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-state-warn-secondary); color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv2); }
+.dsh-notice .code { font-family: var(--ds-font-family-code); font-weight: 700; }
+
+/* ---------------- 右栏（三列网格的第三列） ---------------- */
+.dsh-rightbar {
+  display: none;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--dsw-specific-sidebar-fill);
+  border-left: 0.5px solid var(--dsw-alias-border-l2);
+}
+.dsh-frame[data-right='1'] .dsh-rightbar { display: flex; }
+.dsh-rbtitle { font-size: 26px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.dsh-rbrows { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; }
+.dsh-rbrow {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--ds-font-family-code); font-size: 22px;
+  color: var(--dsw-alias-label-secondary); white-space: nowrap;
+}
+.dsh-rbrow .st { width: 9px; height: 9px; border-radius: 2px; flex: none; background: var(--dsw-alias-label-tertiary); }
+.dsh-rbrow[data-state='edited'] .st { background: var(--dsw-alias-state-warn-primary); }
+.dsh-rbrow[data-state='new'] .st { background: var(--dsw-alias-state-success-primary); }
+.dsh-rbrow .nm { color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; }
+.dsh-rbrow .dl { margin-left: auto; color: var(--dsw-alias-label-tertiary); }
+.dsh-rbnote { margin-top: auto; font-size: 22px; color: var(--dsw-alias-label-tertiary); }
+
+/* ---------------- composer ---------------- */
+.dsh-composer { padding: 0 36px 16px; display: flex; flex-direction: column; gap: 6px; }
+.dsh-card {
+  border-radius: var(--dsw-radius-panel); background: var(--dsw-specific-input-major);
+  box-shadow: var(--dsw-elevation-soft); padding: 10px 14px 8px;
+  display: flex; flex-direction: column; gap: 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+}
+.dsh-input { font-size: 32px; min-height: 38px; color: var(--dsw-alias-label-primary); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.dsh-input .ph { color: var(--dsw-alias-label-tertiary); }
+.dsh-input .caret { width: 3px; height: 32px; background: var(--dsw-alias-state-business-primary); display: inline-block; }
+.dsh-crow { display: flex; align-items: center; gap: 10px; }
+.dsh-chip {
+  font-size: 22px; padding: 2px 10px; border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-secondary);
+  white-space: nowrap; display: flex; align-items: center; gap: 6px;
+}
+.dsh-chip .ws { width: 10px; height: 8px; border: 1.5px solid currentColor; border-radius: 2px; }
+.dsh-spacer { flex: 1; }
+.dsh-send {
+  width: 38px; height: 38px; border-radius: 50%; flex: none;
+  background: var(--dsw-alias-button-info-fill); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 22px;
+}
+.dsh-dock { display: flex; align-items: center; gap: 10px; }
+.dsh-ctx { display: flex; align-items: center; gap: 8px; font-size: 24px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dsh-ctx svg { width: 20px; height: 20px; }
+.dsh-ctx .track { stroke: var(--dsw-alias-border-l3); stroke-width: 2; fill: none; }
+.dsh-ctx .fill { stroke: var(--dsw-alias-label-tertiary); stroke-width: 2; fill: none; transform: rotate(-90deg); transform-origin: 7px 7px; }
+.dsh-ctx.hot { color: var(--dsw-alias-state-error-primary); }
+.dsh-ctx.hot .fill { stroke: var(--dsw-alias-state-error-primary); }
+
+/* ---------------- 权限弹窗 ---------------- */
+.dsh-modalwrap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.dsh-modal {
+  border-radius: var(--dsw-radius-panel); overflow: hidden;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 88%, transparent);
+  backdrop-filter: blur(22px) saturate(1.2);
+  -webkit-backdrop-filter: blur(22px) saturate(1.2);
+  border: 1px solid var(--dsw-alias-state-warn-secondary);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+.dsh-modal .strip { padding: 10px 16px; font-size: 30px; color: var(--dsw-alias-state-warn-label); background: rgba(247, 173, 49, 0.16); display: flex; align-items: center; gap: 10px; }
+.dsh-modal .body { padding: 12px 16px; font-size: 30px; color: var(--dsw-alias-label-primary); }
+.dsh-modal .acts { display: flex; justify-content: flex-end; gap: 10px; padding: 0 16px 16px; }
+.dsh-btn { height: 38px; padding: 0 18px; border-radius: var(--dsw-radius-md); font-size: 24px; display: flex; align-items: center; border: 0.5px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-label-primary); }
+.dsh-btn.primary { background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-bg-base); border-color: transparent; }
+
+/* ---------------- 故障：clip-path 切片（仅 glitch 明显时） ---------------- */
+.dsh-root[data-glitch='1'] .dsh-frame {
+  clip-path: polygon(
+    0% 0%, 100% 0%, 100% calc(18% + var(--dsh-disp) * 4%),
+    calc(var(--dsh-glitch) * 3%) calc(18% + var(--dsh-disp) * 4%),
+    calc(var(--dsh-glitch) * 3%) 34%, 100% 34%, 100% 100%, 0% 100%
+  );
+  text-shadow:
+    calc(var(--dsh-disp) * 1px) 0 0 rgba(255, 0, 60, 0.5),
+    calc(var(--dsh-disp) * -1px) 0 0 rgba(0, 229, 255, 0.5);
+}
+
+/* ---------------- ?dshpreview：整屏静态对照页（亮/暗并排） ---------------- */
+#dsh-preview {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  background: #0b0d12;
+}
+#dsh-preview .dsh-set { position: relative; width: 940px; flex: none; }
+#dsh-preview .dsh-set .lbl {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 20px; color: #8b90a0; padding: 0 0 6px 2px;
+}
+#dsh-preview .dsh-set .box {
+  position: relative; width: 940px; height: 529px; overflow: hidden; border-radius: 12px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+#dsh-preview .dsh-set[data-theme='light'] .box { background: #eef0f3; }
+#dsh-preview .dsh-set[data-theme='dark'] .box { background: #0e0f12; }

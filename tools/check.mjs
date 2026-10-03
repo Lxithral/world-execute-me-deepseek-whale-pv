@@ -161,5 +161,17 @@ ok(missing.length === 0, 'public/whale 素材齐备', missing.length ? `缺 ${mi
 const inv = path.join(ROOT, 'assets', 'whale_inventory.json')
 ok(fs.existsSync(inv), 'assets/whale_inventory.json 存在')
 
+console.log('== §6：歌词原文不得漏到歌词层之外 ==')
+{
+  const { execFileSync } = await import('node:child_process')
+  let out = ''
+  try {
+    out = execFileSync(process.execPath, [path.join(HERE, 'lyric_leak_check.mjs')], { cwd: ROOT, encoding: 'utf8' })
+  } catch (e) {
+    out = String(e.stdout || e.message)
+  }
+  ok(out.trim().startsWith('OK'), 'src/ 无歌词原文（3-gram / 4-gram 比对）', out.trim().split('\n').slice(0, 4).join(' | '))
+}
+
 console.log(`\n== 汇总：PASS ${passes}  FAIL ${fails} ==`)
 process.exit(fails ? 1 : 0)

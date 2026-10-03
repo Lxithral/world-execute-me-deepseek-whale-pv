@@ -12,3 +12,6 @@ refs/
 
 # 生成物：可随时用 npm run data 重建
 public/data/
+
+# 播放用音频（由 assets/song.mp3 复制而来，受版权保护，不入库）
+public/audio/
