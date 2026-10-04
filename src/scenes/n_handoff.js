@@ -94,9 +94,34 @@ export default {
     // ---- 3:10.8 交接卡片 ----
     // 词锚点：交接卡片的时刻（DIRECTOR 3:10.8 与 anchors.js 的 N.handoff 一致）
     const tHandoff = ctx.cues.sec('N', 'handoff', 190.8)
-    const cardA = span(t, tHandoff, tHandoff + 0.6) * (1 - span(t, tHandoff + 2.6, tHandoff + 3.4))
+    // ⚠️ T09 踩坑：交接卡与旧窗口**同在左带**（x∈[3%,34%]）。第一版卡片活到 194.4、
+    // 旧窗口从 192.6 起淡入 → 192.6–194.2 两者重叠，实测 193.0/193.5/194.0 每帧 **3 处**。
+    // 现在：卡片 190.8 起、**193.2 淡完**；旧窗口**延到 193.6** 才淡入 —— 中间留 0.4s 空档。
+    const cardA = span(t, tHandoff, tHandoff + 0.6) * (1 - span(t, tHandoff + 2.0, tHandoff + 2.4))
     if (cardA > 0.01) {
-      handoffCard(g, { x: W * 0.32, y: H * 0.20, w: 640, alpha: cardA, pct: ctxAt(190.8), t })
+      // T09 / §1.15：交接卡片**放大成终端形态** ——
+      // 左侧带 x = 3%W（x∈[3%,34%]）、高 0.42H = 454px（≥ 38%H = 410）、
+      // 文字 36px（≥36）、5 行（≤5）、逐行 + 行内逐字键入。
+      // 不再用 `dsh.js` 的 `handoffCard()`（它内部是 12–14px，且是老式卡片版式）。
+      const cx = W * 0.03
+      const cy = H * 0.26
+      const cw = W * 0.31
+      const chh = H * 0.42
+      const CARD = ['handoff.md', 'from session #001', 'items: 1', 'target: #002', 'ok ▸ resume']
+      g.save()
+      g.globalAlpha = cardA
+      nestedWindow(g, { x: cx, y: cy, w: cw, h: chh, depth: 1, alpha: 1, label: 'handoff' })
+      g.font = MONO(36, 500)
+      g.textAlign = 'left'
+      g.textBaseline = 'top'
+      for (let i = 0; i < CARD.length; i++) {
+        const lu = clamp((t - tHandoff - i * 0.35) / 0.28)
+        if (lu <= 0) continue
+        const str = CARD[i].slice(0, Math.max(1, Math.round(lu * CARD[i].length)))
+        g.fillStyle = i === 0 ? C.cyan : rgba(C.fg, 0.9)
+        g.fillText(str, cx + 18, cy + 44 + i * 46)
+      }
+      g.restore()
     }
 
     // ---- 3:12–3:20 handoff.md 从心脏飞进右下角新窗口 ----
@@ -151,53 +176,23 @@ export default {
   },
 }
 
-/* ---------------- 心脏（⚠️ T07 已撤用：见下方说明） ----------------
- * ⚠️ T07 / FIX_V4 §1.14：「**删除右侧红色爱心及其标注（如 heartbeat 读数）**」。
- * 段 N 现在用的是 `src/lib/heart3d.js` 的蓝色 3D 粒子爱心（22000 粒、加法混合、白热核心、
- * 心跳冲击波环、轮廓发光管、火花粒子），与段 M 共用同一份实现。
- * 下面这个 2D `drawHeart()` 已**不再被调用**（含那行 `heartbeat N bpm` 读数）；
- * 保留函数体只是留作记录，**下次清理时整块删除**。任何情况下都不要把它接回画面。
- */
-function drawHeart(g, ctx, t, a, beat, bpm) {
-  const { W, H } = ctx
-  const cx = W * 0.72
-  const cy = H * 0.48
-  const R = H * 0.16 * (1 + 0.09 * beat)
-  g.save()
-  g.globalAlpha = a
-  g.fillStyle = rgba('#8f2038', 0.9)
-  g.beginPath()
-  for (let i = 0; i <= 120; i++) {
-    const th = (i / 120) * TAU
-    const x = 16 * Math.sin(th) ** 3
-    const y = 13 * Math.cos(th) - 5 * Math.cos(2 * th) - 2 * Math.cos(3 * th) - Math.cos(4 * th)
-    const px = cx + x * (R / 16)
-    const py = cy - y * (R / 16)
-    i === 0 ? g.moveTo(px, py) : g.lineTo(px, py)
-  }
-  g.closePath()
-  g.fill()
-  g.strokeStyle = rgba('#ff8fa3', 0.5 + 0.5 * beat)
-  g.lineWidth = 2
-  g.stroke()
-  g.font = MONO(13, 600)
-  g.fillStyle = rgba('#ffb0c0', 0.9)
-  g.textAlign = 'center'
-  g.textBaseline = 'alphabetic'
-  g.fillText(`heartbeat ${bpm.toFixed(0)} bpm`, cx, cy + R * 1.5)
-  g.restore()
-}
-
 /* ---------------- handoff.md 飞行 ---------------- */
 function drawHandoffFlight(g, ctx, t, beat) {
   const { W, H } = ctx
   const a = span(t, 191.9, 192.4)
   const u = inOutCubic(clamp(span(t, 192.0, 199.6)))
   if (a <= 0.01) return
-  const x0 = W * 0.72
-  const y0 = H * 0.48
-  const x1 = W * 0.80
-  const y1 = H * 0.76
+  // T09 / §1.15：「handoff.md 做成**带拖尾的发光彗星**，**从爱心飞向新会话窗口**」。
+  // 旧路径是 0.72W→0.80W（两个点都在右侧，起点根本不是爱心）；现在
+  //   起点 = 爱心的屏幕位置（画面中央 0.50W, 0.50H，与 T07 把心放中央一致）
+  //   终点 = 新会话窗口（0.66W…0.97W, 0.46H…0.80H）的左缘中部 ≈ (0.70W, 0.62H)
+  const x0 = W * 0.5
+  const y0 = H * 0.5
+  // ⚠️ 终点必须停在**新窗口左缘之外**：文件框半宽 120px、窗口左缘 0.66W=1267，
+  // 所以终点 x 要 ≤ 0.58W(=1114) 才不会压到窗口里的日志 —— 实测落在 0.70W 时
+  // `handoff.md` 会压住日志行 `sandbox: on`（IoU 0.416，196.8–200.8 每帧 1 处）。
+  const x1 = W * 0.58
+  const y1 = H * 0.60
   // 弧线路径
   const bend = -H * 0.22 * Math.sin(u * Math.PI)
   const x = x0 + (x1 - x0) * u
@@ -205,6 +200,22 @@ function drawHandoffFlight(g, ctx, t, beat) {
   const arrived = u >= 0.999
   g.save()
   g.globalAlpha = arrived ? 1 - span(t, 200.0, 201.0) : 1
+  // T09：**拖尾** —— 沿同一条弧线往后取 7 个采样点，逐个变小变淡
+  for (let k = 7; k >= 1; k--) {
+    const uu = clamp(u - k * 0.035)
+    if (uu <= 0) continue
+    const bendK = -H * 0.22 * Math.sin(uu * Math.PI)
+    const tx = x0 + (x1 - x0) * uu
+    const ty = y0 + (y1 - y0) * uu + bendK
+    const rr = 14 - k * 1.4
+    const tg = g.createRadialGradient(tx, ty, 0, tx, ty, rr)
+    tg.addColorStop(0, rgba(C.gold, (0.42 - k * 0.05) * (0.7 + 0.3 * beat)))
+    tg.addColorStop(1, 'rgba(0,0,0,0)')
+    g.fillStyle = tg
+    g.beginPath()
+    g.arc(tx, ty, rr, 0, TAU)
+    g.fill()
+  }
   // 发光
   const rg = g.createRadialGradient(x, y, 0, x, y, 46)
   rg.addColorStop(0, rgba(C.gold, 0.75 + 0.25 * beat))
@@ -213,14 +224,14 @@ function drawHandoffFlight(g, ctx, t, beat) {
   g.beginPath()
   g.arc(x, y, 46, 0, TAU)
   g.fill()
-  // 小文件
-  roundRect(g, x - 34, y - 22, 68, 44, 5)
+  // 小文件（T09：标签从 11px 抬到 **36px**，文件框相应放大到 240×86，否则字会溢出）
+  roundRect(g, x - 120, y - 43, 240, 86, 8)
   g.fillStyle = rgba('#1a1c22', 0.96)
   g.fill()
   g.strokeStyle = C.gold
-  g.lineWidth = 1.6
+  g.lineWidth = 2
   g.stroke()
-  g.font = MONO(11, 700)
+  g.font = MONO(36, 700)
   g.fillStyle = C.gold
   g.textAlign = 'center'
   g.textBaseline = 'middle'
@@ -244,29 +255,29 @@ function drawHandoffFlight(g, ctx, t, beat) {
 /* ---------------- 旧窗口变灰 ---------------- */
 function drawOldWindow(g, ctx, t, slow) {
   const { W, H } = ctx
-  const a = span(t, 192.6, 193.6) * (1 - span(t, 205.4, 205.96)) * (1 - span(t, 188.5, 189.2) * 0)
+  const a = span(t, 193.6, 194.6) * (1 - span(t, 205.4, 205.96)) * (1 - span(t, 188.5, 189.2) * 0)
   if (a <= 0.01) return
-  const x = W * 0.05
+  const x = W * 0.03
   const y = H * 0.16
-  const w = W * 0.30
+  const w = W * 0.31
   const h = H * 0.44
   g.save()
   g.globalAlpha = a
   nestedWindow(g, { x, y, w, h, depth: 0, alpha: 1, label: 'session #001' })
-  // 变灰的内容
+  // 变灰的内容（T09：文字一律 ≥36px）
   const grey = 0.35 + 0.5 * slow
   g.globalAlpha = a * grey
   g.fillStyle = 'rgba(60,64,72,0.85)'
-  g.fillRect(x + 8, y + 26, w - 16, h - 34)
+  g.fillRect(x + 8, y + 46, w - 16, h - 58)
   g.globalAlpha = a * 0.8
-  g.font = MONO(12, 500)
+  g.font = MONO(36, 500)
   g.fillStyle = rgba(C.fgDim, 0.7)
   g.textAlign = 'left'
   g.textBaseline = 'top'
-  ;['— — — — —', '— — —', '— — — —', '— —'].forEach((s, i) => g.fillText(s, x + 20, y + 44 + i * 22))
-  g.font = MONO(12, 700)
+  ;['— — — — —', '— — —', '— — — —', '— —'].forEach((s, i) => g.fillText(s, x + 20, y + 62 + i * 44))
+  g.font = MONO(36, 700)
   g.fillStyle = rgba(C.red, 0.7)
-  g.fillText('archived', x + 20, y + h - 26)
+  g.fillText('archived', x + 20, y + h - 56)
   g.restore()
 }
 
@@ -275,33 +286,41 @@ function drawNewSession(g, ctx, t, freeze) {
   const { W, H, sync } = ctx
   const a = span(t, 193.2, 194.0) * (1 - freeze * 0.9)
   if (a <= 0.01) return
-  const x = W * 0.60
-  const y = H * 0.62
-  const w = W * 0.36
-  const h = H * 0.32
+  // T09 / §1.15：新会话窗口放到**右侧带** x∈[66%,97%]，文字 ≥36px。
+  // 垂直位置压到歌词区（y>0.8H=864）之上：y=0.46H、h=0.34H → 497–841 ✓
+  // 同时与爱心中心半径（圆心=画面中央、半径 28%H=302px）保持距离：x 最小 1267，1267−960=307 > 302 ✓
+  const x = W * 0.66
+  const y = H * 0.46
+  const w = W * 0.31
+  const h = H * 0.34
   g.save()
   g.globalAlpha = a
   nestedWindow(g, { x, y, w, h, depth: 1, alpha: 1, label: 'session #002' })
-  // 开机日志滚动
+  // 开机日志滚动（T09：≥36px）
   const n = clamp(Math.floor((t - 193.4) / 0.9) + 1, 0, LOG.length)
   const lines = LOG.slice(0, n).map((l, i) => ({
     text: l,
     color: i === LOG.length - 1 ? C.gold : C.fgDim,
   }))
-  bootLog(g, { x: x + 14, y: y + 38, lines, alpha: 1, size: 14, lh: 1.7 })
-  // 最后一行内容是一个 ♥
+  bootLog(g, { x: x + 14, y: y + 62, lines, alpha: 1, size: 36, lh: 1.5 })
+  // T09 / §1.15：日志末行的 `restored: 1 item (unreadable) ♥` 单独做成
+  // **≥64px 的发光大字**并轻微脉冲。放在**顶部居中**：
+  //   宽度（64px 下约 1178px）放不进 595px 宽的右窗口，而顶部居中处
+  //   距爱心中心 sqrt(432²) = 432 > 302 ✓、也不与左右两个窗口相交（它们在 y≥173）。
   if (n >= LOG.length) {
-    const u = span(t, 197.9, 199.0)
-    if (u > 0) {
+    const u = span(t, 197.9, 198.5) * (1 - freeze)
+    if (u > 0.01) {
+      const pulse = 1 + 0.045 * Math.sin(t * 3.6)
+      g.save()
       g.globalAlpha = a * u
-      g.font = MONO(30, 700)
-      g.fillStyle = C.red
-      g.textAlign = 'left'
-      g.textBaseline = 'alphabetic'
-      g.fillText('♥', x + 34, y + 38 + LOG.length * 14 * 1.7 + 34)
-      g.font = MONO(12, 500)
-      g.fillStyle = rgba(C.fgDim, 0.8)
-      g.fillText('(unreadable)', x + 70, y + 38 + LOG.length * 14 * 1.7 + 34)
+      g.font = MONO(Math.round(68 * pulse), 700)
+      g.textAlign = 'center'
+      g.textBaseline = 'middle'
+      g.shadowColor = rgba(C.gold, 0.95)
+      g.shadowBlur = 30
+      g.fillStyle = '#fff3d0'
+      g.fillText('restored: 1 item (unreadable) ♥', W / 2, H * 0.10)
+      g.restore()
     }
   }
   g.restore()

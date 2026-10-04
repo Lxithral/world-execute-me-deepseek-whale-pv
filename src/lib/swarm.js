@@ -351,7 +351,7 @@ export const BRIDGE_HALF = 0.55
 export const SEGMENT_SWARM = {
   A: { from: 'cloud', to: 'cube', t0: 8.6, t1: 14.2, size: 0.05, alpha: 0.14 },
   B: { from: 'ring', to: 'tunnel', t0: 16.2, t1: 21.5, size: 0.045, alpha: 0.16 },
-  C: { from: 'cloud', to: 'grid', t0: 36.5, t1: 43.6, size: 0.05, alpha: 0.34 },
+  C: { from: 'cloud', to: 'grid', t0: 36.5, t1: 43.6, size: 0.05, alpha: 0.34, chars: false },
   D: { from: 'sine', to: 'ring', t0: 52.5, t1: 58.6, size: 0.045, alpha: 0.18 },
   E: { from: 'cube', to: 'grid', t0: 68.0, t1: 73.6, size: 0.045, alpha: 0.20 },
   F: { from: 'grid', to: 'ring', t0: 82.5, t1: 88.4, size: 0.045, alpha: 0.22 },
@@ -396,6 +396,19 @@ export function segAt(t) {
   let cur = 'A'
   for (const [id, a, b] of SEG_EDGES) if (t >= a && t < b) cur = id
   return cur
+}
+
+/**
+ * T16b / FIX_V4 §1.4：「本段蜂群**不使用字符形态**」。
+ * 为什么需要这个开关：3D 蜂群（`createSwarm`）的**每个粒子都是一枚字形** ——
+ * 顶点着色器里有 `attribute vec2 aGlyph`，片元用 `vUv = aGlyph + uv / uAtlasGrid` 去采样
+ * `glyphAtlas()` 那张图集；而 2D 蜂群（`lib/swarm2d.js`）是**方形 Points**（点/短横），本来就不是字符。
+ * 所以"段 C 不用字符形态"= 段 C 期间**关掉 3D 字形层**，把画面交给段 C 自己的 `THREE.Points` 圆点云 + 2D 点层。
+ * 默认返回 true（其它段落照旧用字形），在 `SEGMENT_SWARM` 里给某段写 `chars: false` 即可关掉。
+ */
+export function swarmCharsAt(t) {
+  const cfg = SEGMENT_SWARM[segAt(t)]
+  return !(cfg && cfg.chars === false)
 }
 
 /**

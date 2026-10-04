@@ -29,9 +29,10 @@ export const PANE_W = 1024
 export const PANE_H = 640
 /** 标题栏高度（§2.2） */
 export const TITLE_H = 56
-/** 正文行高与字号（§2.2：正文等宽 ≥30px） */
-const BODY_PX = 30
-const LINE_H = 44
+/** 正文行高与字号（T03b：FIX_V4 §2.3 要求**面板类文字最小 34px**，优先于 V3 §2.2 的 ≥30px） */
+// 版式核对：MAX_LINES(7) × LINE_H(48) = 336，加 TITLE_H(56) 与内边距仍远小于 PANE_H(640)，不会溢出。
+const BODY_PX = 34
+const LINE_H = 48
 /** 一屏最多几行（§2.2） */
 export const MAX_LINES = 7
 /** 一行最多多少"字符预算"：18 汉字 或 40 英文字符 */

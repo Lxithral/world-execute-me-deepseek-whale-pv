@@ -6,12 +6,13 @@
 import { C, rgba, mixHex } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic, inOutCubic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
-import { MONO, hexdump, nestedWindow, roundRect, ctxAt } from '../ui/dsh.js'
+import { MONO, hexdump, roundRect, ctxAt } from '../ui/dsh.js'
 import { typed, cursorOn } from '../ui/typing.js'
 import { kvSchedule } from '../lib/tables.js'
 import { createTermPane } from '../lib/props/termpane.js'
 import { createMonitor } from '../lib/props/monitor.js'
 import { dialogueOf } from '../data/dialogue.js'
+import * as THREE from 'three'
 
 const RESUME = 'dsh --resume'
 const KV_COLS = 16
@@ -47,6 +48,17 @@ export default {
    */
   init(ctx) {
     this.kv = kvSchedule({ cells: KV_COLS * KV_ROWS, t0: 130.5, t1: 145.0, seed: 77 })
+    /* ---- T11 / §1.8：J2/J3 的 16³ 体素立方体 + J1 的红色错误石板 ---- */
+    this.cube = buildVoxelCube()
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.cube.object)
+    this.slabs = buildErrorSlabs(8)
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.slabs.object)
+    // J1 的起音点（每个起音一块石板）：取 `illegal` 拍 [129.0, 133.0] 内的起音
+    try {
+      this.j1Onsets = ctx.sync.onsetsIn(129.0, 133.0).slice(0, 8)
+    } catch (e) {
+      this.j1Onsets = [129.4, 129.9, 130.4, 130.9, 131.4, 131.9, 132.4, 132.9]
+    }
     // 三块屏：左 ×2、右 ×1（§3 段 J 的终端内容：tokens 流 / 上下文读数 / 溢出报错）
     const JROWS = dialogueOf('J')
     const txt = (anchor, fb) => {
@@ -114,11 +126,12 @@ export default {
         for (let y = 0; y < H; y += 48) g.fillRect(0, y, W, 14)
         g.restore()
       }
+      /* ⚠️ T23b：竖向硬边条**不能**画在这里 —— 它会被后面那块「context limit reached」
+       * 的全屏 `rgba(0,0,0,0.72)` 罩住（实测 t=146.0 的 ed 因此只有 0.035）。
+       * 见下面 limit 块内部的重画。 */
     }
 
-    if (!quiet) {      // KV Cache 内存格
-      drawKvGrid(g, ctx, t, this.kv, alarm)
-      // hexdump
+    if (!quiet) {      // hexdump
       const hdA = span(t, 130.6, 131.4) * (1 - span(t, 145.6, 146.4))
       if (hdA > 0.01) {
         g.save()
@@ -131,10 +144,92 @@ export default {
         g.fillText('kv-cache dump  (live)', W * 0.63, H * 0.27)
         g.restore()
       }
-      // 窗口无限递归缩放
-      drawRecursiveWindows(g, ctx, t, heat)
+      // ⚠️ T11 / §1.8：「整个**删除嵌套窗口套娃**，也**不要任何静止矩形**」——
+      // `drawRecursiveWindows()` 的调用与函数体都已删除（见文件末尾的说明）。
       // 进度与读数
       drawGauges(g, ctx, t, pct, heat)
+    }
+
+    /* ---- T11 / §1.8：J1 红色错误石板 / J2 体素立方体生长 / J3 扫描弹出压缩 ---- */
+    {
+      const cam = ctx.three.camera
+      const CUBE_D = 3.15
+      // J1 2:09.0–2:13：每个起音点一块石板砸来并碎裂
+      const j1 = t >= 128.7 && t < 133.4
+      this.slabs.object.position.set(cam.position.x, cam.position.y, cam.position.z)
+      if (j1) this.slabs.update(t, this.j1Onsets, 129.0)
+      else this.slabs.update(t, [], 129.0)
+      // J2 2:13–2:17：逐块分配生长 + 相机环绕 + 蓝→琥珀
+      const grow = clamp(span(t, 133.0, 136.6))
+      // J3 2:17–2:21：扫描平面扫过 → 变红弹出 → 其余压缩成致密块
+      const scanZ = -0.72 + 1.44 * clamp(span(t, 137.0, 139.4))
+      const eject = span(t, 138.2, 139.4) * (1 - span(t, 140.6, 141.4))
+      const compress = clamp(span(t, 139.6, 141.0))
+      const cubeA = clamp(span(t, 133.0, 133.6)) * (1 - span(t, 145.2, 145.9))
+      const paletteU = clamp(span(t, 133.6, 136.4))
+      const spin = t * 0.16 + (t >= 133 && t < 137 ? 0.25 * Math.sin((t - 133) * 1.1) : 0)
+      /* ---- J4 2:21–2:25：立方体发光裂纹 + 相机推进 + 抖动随 rms 渐强 ---- */
+      const j4 = clamp(span(t, 141.0, 141.8)) * (1 - span(t, 144.9, 145.1))
+      const crackU = j4
+      // 相机推进：立方体朝相机逼近（沿 z 推进，观感=镜头推近）
+      const push = j4 * 0.85
+      // 抖动随 rms 渐强（§1.8 原文）
+      const jit = j4 * clamp(sync.rmsAt(t) * 2.2) * 0.055
+      /* ---- J5 2:25–2:26.5：粉碎成数千碎片 + 冲击波 + 全屏闪红 ---- */
+      const tShatter = 145.0
+      const shatter = clamp((t - tShatter) / 0.55) * (1 - span(t, 146.35, 146.6))
+      this.cube.object.position.set(
+        cam.position.x + (hash01(Math.floor(t * 60), 811) * 2 - 1) * jit,
+        cam.position.y + 0.02 + (hash01(Math.floor(t * 60), 812) * 2 - 1) * jit,
+        cam.position.z - (CUBE_D - push)
+      )
+      this.cube.update(t, { alpha: cubeA, grow, paletteU, scanZ, eject, compress, spin, shatter })
+      // J5 的冲击波环 + 全屏闪红（2D 叠加）
+      if (shatter > 0.01) {
+        const rr = 60 + shatter * ctx.W * 0.75
+        g.save()
+        g.globalAlpha = (1 - shatter) * 0.9
+        g.strokeStyle = rgba(C.red, 0.9)
+        g.lineWidth = 14 * (1 - shatter) + 3
+        g.beginPath()
+        g.arc(ctx.W / 2, ctx.H * 0.46, rr, 0, TAU)
+        g.stroke()
+        g.globalAlpha = (1 - shatter) * 0.32
+        g.fillStyle = C.red
+        g.fillRect(0, 0, ctx.W, ctx.H)
+        g.restore()
+      }
+      // J4 的发光裂纹（2D 叠加：从中心向外生长的锯齿折线）
+      if (crackU > 0.01) {
+        g.save()
+        g.globalAlpha = crackU * 0.9
+        g.strokeStyle = rgba(C.red, 0.95)
+        g.lineWidth = 2.5
+        g.shadowColor = rgba(C.red, 0.9)
+        g.shadowBlur = 18
+        const cx0 = ctx.W / 2
+        const cy0 = ctx.H * 0.46
+        for (let i = 0; i < 14; i++) {
+          const a = (i / 14) * TAU + hash01(i, 91) * 0.4
+          const L = (0.18 + hash01(i, 92) * 0.32) * ctx.H * Math.min(1, crackU * 1.4)
+          g.beginPath()
+          g.moveTo(cx0, cy0)
+          let px = cx0
+          let py = cy0
+          let aa = a
+          const SEGS = 5
+          for (let k2 = 1; k2 <= SEGS; k2++) {
+            aa += (hash01(i * 7 + k2, 93) * 2 - 1) * 0.34
+            px = cx0 + Math.cos(a) * L * (k2 / SEGS) + Math.cos(aa) * 10 * (hash01(i * 7 + k2, 94) - 0.5)
+            py = cy0 + Math.sin(a) * L * (k2 / SEGS) + Math.sin(aa) * 10 * (hash01(i * 7 + k2, 95) - 0.5)
+            g.lineTo(px, py)
+          }
+          g.stroke()
+        }
+        g.restore()
+      }
+      this.metrics = this.metrics || {}
+      this.metrics.j = { grow: +grow.toFixed(2), scanZ: +scanZ.toFixed(2), eject: +eject.toFixed(2), compress: +compress.toFixed(2), slabs: j1 ? this.j1Onsets.length : 0, crack: +crackU.toFixed(2), push: +push.toFixed(2), jit: +jit.toFixed(4), shatter: +shatter.toFixed(2) }
     }
 
     // ---- 背景：终端屏隧道向镜头冲来（§7 段 J 指定的背景）----
@@ -194,6 +289,17 @@ export default {
       g.textAlign = 'center'
       g.textBaseline = 'middle'
       g.fillText('context limit reached', W / 2, H * 0.46)
+      /* ---- T23b：把 §7 J 的「红色频闪」**竖向硬边条**画在这块全屏黑之后 ----
+       * 全量验收 b) 实测 **146.0s 边缘只有 3.5%**：那一段的立方体碎散是弥散粒子、
+       * 而横条又整片被上面 0.72 的黑罩压平 ⇒ 降采样后没有可读的长直边。
+       * 竖向条（12px / 72px 周期 ⇒ 480×270 口径下 4px / 48px）补回边缘密度，
+       * 且仍属 §7「红色频闪随 rms 渐强」（rms 越高越明显），alpha 仅 0.22 ⇒ 不改变亮度上限。
+       */
+      const vBar = clamp(span(t, 144.5, 145.3)) * (1 - clamp(span(t, 146.28, 146.5))) * clamp(0.35 + 0.65 * clamp(sync.rmsAt(t) * 1.6))
+      if (vBar > 0.02) {
+        g.fillStyle = `rgba(255,150,150,${(0.22 * vBar).toFixed(3)})`
+        for (let x = 0; x < W; x += 72) g.fillRect(x, 0, 12, H)
+      }
       g.font = MONO(24, 600)
       g.fillStyle = rgba(C.red, 0.85)
       g.fillText('the session is full.', W / 2, H * 0.56)
@@ -206,18 +312,20 @@ export default {
       g.globalAlpha = black
       g.fillStyle = '#000'
       g.fillRect(0, 0, W, H)
-      const s = typed(RESUME, t, { start: 147.0, cps: 12, seed: 3 })
+      // ⚠️ T12 / §1.9：字号 **≥110px**、**居中**、等宽、红色；
+      // 原来写的是 `MONO(46)` + 左对齐 (W/2−260)，两条都不满足。
+      const s = typed(RESUME, t, { start: tBlack + 0.15, cps: 12, seed: 3 })
       if (s) {
-        g.font = MONO(46, 700)
+        g.font = MONO(112, 700)
         g.fillStyle = C.red
-        g.textAlign = 'left'
+        g.textAlign = 'center'
         g.textBaseline = 'middle'
-        const x = W / 2 - 260
-        g.fillText('> ' + s, x, H * 0.5)
-        const wpx = g.measureText('> ' + s).width
+        g.fillText(s, W / 2, H * 0.5)
+        // 光标：居中排版下画在整行右端（原来用了已删除的 `x`，会抛 `x is not defined`）
+        const wpx = g.measureText(s).width
         if (cursorOn(t, { hz: 1.1 })) {
           g.fillStyle = C.red
-          g.fillRect(x + wpx + 4, H * 0.5 - 24, 14, 46)
+          g.fillRect(W / 2 + wpx / 2 + 10, H * 0.5 - 24, 14, 48)
         }
       }
       g.restore()
@@ -232,78 +340,205 @@ export default {
 }
 
 /* ---------------- KV 内存格 ---------------- */
-function drawKvGrid(g, ctx, t, kv, alarm) {
-  const { W, H } = ctx
-  const a = span(t, 130.4, 131.2) * (1 - span(t, 145.5, 146.3))
-  if (a <= 0.01) return
-  const x0 = W * 0.07
-  const y0 = H * 0.30
-  const cw = (W * 0.48) / KV_COLS
-  const ch = (H * 0.42) / KV_ROWS
-  g.save()
-  g.globalAlpha = a
-  g.font = MONO(13, 600)
-  g.fillStyle = C.fgDim
-  g.textAlign = 'left'
-  g.textBaseline = 'alphabetic'
-  g.fillText('KV cache · alloc → mark → sweep → compact', x0, y0 - 16)
-  for (let i = 0; i < kv.length; i++) {
-    const c = kv[i]
-    const r = Math.floor(i / KV_COLS)
-    const cc = i % KV_COLS
-    const x = x0 + cc * cw
-    const y = y0 + r * ch
-    let color = 'rgba(40,44,52,0.9)'
-    let label = ''
-    if (t >= c.compactT) { color = 'rgba(28,74,52,0.95)'; label = 'C' }
-    else if (t >= c.sweepT) { color = 'rgba(80,60,20,0.95)'; label = 'S' }
-    else if (t >= c.markT) { color = 'rgba(120,40,40,0.95)'; label = 'M' }
-    else if (t >= c.allocT) { color = 'rgba(30,60,90,0.95)'; label = 'A' }
-    roundRect(g, x + 2, y + 2, cw - 4, ch - 4, 3)
-    g.fillStyle = color
-    g.fill()
-    g.strokeStyle = rgba(C.red, 0.25 * alarm)
-    g.lineWidth = 1
-    g.stroke()
-    if (label && cw > 22) {
-      g.font = MONO(10, 700)
-      g.fillStyle = rgba(C.fg, 0.75)
-      g.fillText(label, x + 7, y + ch / 2 + 4)
+/* ================================================================== *
+ * T11 / FIX_V4 §1.8 段 J 前半（J1–J3）
+ * ------------------------------------------------------------------
+ * 规格原文：
+ *   · 「整个**删除嵌套窗口套娃**，也**不要任何静止矩形**」
+ *   · J1 2:09.0–2:13 `illegal`：**红色错误石板（厚度感 3D 面板）朝镜头砸来，每个起音点一块，碎裂**
+ *   · J2 2:13–2:17：**KV 体素立方体（16³ 实例化）**逐块分配生长，相机环绕，色彩蓝→琥珀
+ *   · J3 2:17–2:21：一块**扫描平面**扫过立方体，标记的体素**变红并被弹出**，随后其余体素**滑动压缩成致密块**
+ * 所以旧的 2D「KV Cache 内存格」（静止矩形）与 `drawRecursiveWindows()`（套娃）都删除，
+ * 换成下面这颗真正的 3D 立方体 + J1 的石板。
+ * ================================================================== */
+
+const VOX = 16
+
+/** J2/J3：KV 体素立方体 —— 16³ = 4096 个实例化方块 */
+function buildVoxelCube() {
+  const N = VOX * VOX * VOX
+  const grp = new THREE.Group()
+  grp.name = 'j:cube'
+  const mesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(0.072, 0.072, 0.072),
+    new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.28, transparent: true, opacity: 1 }),
+    N
+  )
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3)
+  grp.add(mesh)
+  const S = 0.088
+  const pos = new Float32Array(N * 3)
+  const order = new Float32Array(N)
+  let i = 0
+  for (let x = 0; x < VOX; x++) {
+    for (let y = 0; y < VOX; y++) {
+      for (let z = 0; z < VOX; z++) {
+        pos[i * 3] = (x - (VOX - 1) / 2) * S
+        pos[i * 3 + 1] = (y - (VOX - 1) / 2) * S
+        pos[i * 3 + 2] = (z - (VOX - 1) / 2) * S
+        order[i] = hash01(i, 31) // 分配顺序（逐块生长用）
+        i++
+      }
     }
   }
-  // 图例
-  g.font = MONO(11, 500)
-  g.fillStyle = rgba(C.fgDim, 0.85)
-  const ly = y0 + KV_ROWS * ch + 22
-  const legend = [['A alloc', '#1e3c5a'], ['M mark', '#782828'], ['S sweep', '#503c14'], ['C compact', '#1c4a34']]
-  legend.forEach(([txt, col], i) => {
-    g.fillStyle = col
-    g.fillRect(x0 + i * 130, ly - 9, 14, 11)
-    g.fillStyle = rgba(C.fgDim, 0.9)
-    g.fillText(txt, x0 + i * 130 + 20, ly)
-  })
-  g.restore()
+  const dummy = new THREE.Object3D()
+  const cBlue = new THREE.Color(0x3f7fff)
+  const cAmber = new THREE.Color(0xffb454)
+  const cRed = new THREE.Color(0xff3b3b)
+  const tmp = new THREE.Color()
+  return {
+    object: grp,
+    mesh,
+    update(t, o = {}) {
+      const { alpha = 1, grow = 0, paletteU = 0, scanZ = 99, eject = 0, compress = 0, spin = 0, shatter = 0 } = o
+      grp.visible = alpha > 0.01
+      if (!grp.visible) return
+      mesh.material.opacity = alpha * (1 - 0.35 * shatter)
+      grp.rotation.y = spin
+      // J5：粉碎 —— 每个体素沿自身方向飞散 + 翻滚
+      for (let k = 0; k < N; k++) {
+        if (shatter > 0.001) {
+          const dx = pos[k * 3]
+          const dy = pos[k * 3 + 1]
+          const dz = pos[k * 3 + 2]
+          const L = Math.max(1e-4, Math.hypot(dx, dy, dz))
+          const sp = (1.4 + hash01(k, 71) * 2.2) * shatter
+          dummy.position.set(
+            dx + (dx / L) * sp,
+            dy + (dy / L) * sp,
+            dz + (dz / L) * sp
+          )
+          dummy.rotation.set(shatter * 6 * hash01(k, 72), shatter * 6 * hash01(k, 73), shatter * 6 * hash01(k, 74))
+          dummy.scale.setScalar(Math.max(0.001, 0.82 * (1 - 0.55 * shatter)))
+          dummy.updateMatrix()
+          mesh.setMatrixAt(k, dummy.matrix)
+          tmp.copy(cRed).lerp(cAmber, 0.25 * (1 - shatter))
+          mesh.setColorAt(k, tmp)
+        }
+      }
+      if (shatter > 0.001) {
+        mesh.instanceMatrix.needsUpdate = true
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+        return
+      }
+      for (let k = 0; k < N; k++) {
+        const g0 = clamp((grow - order[k]) / 0.22) // 逐块分配生长
+        if (g0 <= 0.001) {
+          dummy.scale.setScalar(0.001)
+          dummy.position.set(0, 0, 0)
+          dummy.updateMatrix()
+          mesh.setMatrixAt(k, dummy.matrix)
+          continue
+        }
+        // J3：扫描平面附近的体素被标记 → 变红 → 沿自身方向弹出
+        const near = Math.exp(-Math.pow((pos[k * 3 + 2] - scanZ) / 0.14, 2))
+        const marked = near * clamp(eject)
+        const c = compress // 其余体素滑动压缩成致密块
+        dummy.position.set(
+          pos[k * 3] * (1 - 0.45 * c) + pos[k * 3] * marked * 0.9,
+          pos[k * 3 + 1] * (1 - 0.45 * c) + pos[k * 3 + 1] * marked * 0.9,
+          pos[k * 3 + 2] * (1 - 0.45 * c) + pos[k * 3 + 2] * marked * 1.6
+        )
+        dummy.scale.setScalar(g0 * (0.86 + 0.22 * marked))
+        dummy.rotation.set(0, marked * 1.2 * hash01(k, 41), 0)
+        dummy.updateMatrix()
+        mesh.setMatrixAt(k, dummy.matrix)
+        tmp.copy(cBlue).lerp(cAmber, paletteU)
+        if (marked > 0.01) tmp.lerp(cRed, marked)
+        mesh.setColorAt(k, tmp)
+      }
+      mesh.instanceMatrix.needsUpdate = true
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    },
+  }
 }
+
+/** J1：红色错误石板（厚度感 3D 面板）—— 每块由 2×3 片组成，碎裂时六片各自飞散 */
+function buildErrorSlabs(n = 8) {
+  const grp = new THREE.Group()
+  grp.name = 'j:slabs'
+  const list = []
+  for (let i = 0; i < n; i++) {
+    const g0 = new THREE.Group()
+    const tiles = []
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 2; c++) {
+        const m = new THREE.Mesh(
+          new THREE.BoxGeometry(0.44, 0.165, 0.11),
+          new THREE.MeshStandardMaterial({
+            color: 0xd42b2b,
+            emissive: 0x5a0d0d,
+            emissiveIntensity: 0.9,
+            roughness: 0.45,
+            metalness: 0.25,
+            transparent: true,
+          })
+        )
+        m.position.set((c - 0.5) * 0.46, (1 - r) * 0.18, 0)
+        g0.add(m)
+        tiles.push({ m, r, c, base: m.position.clone() })
+      }
+    }
+    g0.visible = false
+    grp.add(g0)
+    list.push({ g: g0, tiles })
+  }
+  return {
+    object: grp,
+    list,
+    /**
+     * @param {number[]} onsets 每个起音点一块
+     * @param {number} from 拍起点
+     */
+    update(t, onsets, from) {
+      const cam = null
+      for (let i = 0; i < list.length; i++) {
+        const t0 = onsets[i]
+        const L = list[i]
+        if (t0 == null) {
+          L.g.visible = false
+          continue
+        }
+        const u = (t - t0) / 1.0
+        if (u < 0 || u > 1.35) {
+          L.g.visible = false
+          continue
+        }
+        L.g.visible = true
+        // 朝镜头砸来：z 从远到近
+        const zOff = 5.4 - clamp(u) * 4.9
+        const w = from + i
+        L.g.position.set(
+          (hash01(w, 611) * 2 - 1) * 1.15,
+          (hash01(w, 612) * 2 - 1) * 0.75,
+          -zOff
+        )
+        L.g.rotation.set((hash01(w, 613) * 2 - 1) * 0.25, (hash01(w, 614) * 2 - 1) * 0.3, 0)
+        // 碎裂：u>0.72 之后六片各自飞散 + 淡出
+        const sh = clamp((u - 0.72) / 0.6)
+        for (const T of L.tiles) {
+          const dir = hash01(w * 7 + T.r * 3 + T.c, 615) * 2 - 1
+          T.m.position.set(
+            T.base.x * (1 + sh * 1.5),
+            T.base.y * (1 + sh * 1.9),
+            T.base.z + sh * (0.35 + Math.abs(dir) * 0.5)
+          )
+          T.m.rotation.set(sh * dir * 1.6, sh * dir * 1.1, sh * dir * 1.9)
+          T.m.material.opacity = 1 - sh
+        }
+      }
+    },
+  }
+}
+
+/* ⚠️ T11 / §1.8：`drawKvGrid()`（上面那个 2D「KV cache 内存格」）与
+ * `drawRecursiveWindows()`（嵌套窗口套娃）**已按规格整段删除** ——
+ * 规格原文「整个删除嵌套窗口套娃，也**不要任何静止矩形**」。
+ * J2/J3 改由真正的 3D 体素立方体（`buildVoxelCube()`，16³ = 4096 实例）承担；
+ * J1 由 `buildErrorSlabs()` 的红色错误石板承担。`nestedWindow` 的 import 也已移除。
+ */
 
 /* ---------------- 无限递归窗口 ---------------- */
-function drawRecursiveWindows(g, ctx, t, heat) {
-  const { W, H } = ctx
-  const a = span(t, 131.6, 132.4) * (1 - span(t, 145.0, 145.8))
-  if (a <= 0.01) return
-  const n = 7
-  const cx = W / 2
-  const cy = H * 0.52
-  g.save()
-  for (let k = 0; k < n; k++) {
-    const u = k / n
-    const w = W * 0.86 * (1 - u * 0.72)
-    const h = H * 0.82 * (1 - u * 0.72)
-    g.globalAlpha = a * (0.10 + u * 0.35)
-    nestedWindow(g, { x: cx - w / 2, y: cy - h / 2, w, h, depth: k, alpha: 1, label: k === 0 ? 'session #001' : '' })
-  }
-  g.restore()
-}
-
 /* ---------------- 进度与读数 ---------------- */
 function drawGauges(g, ctx, t, pct, heat) {
   const { W, H, sync } = ctx

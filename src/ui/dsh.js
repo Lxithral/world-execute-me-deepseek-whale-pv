@@ -107,6 +107,12 @@ export function roundRect(g, x, y, w, h, r = 6) {
   g.closePath()
 }
 
+// T07b / FIX_V4 §2.3：「**面板类文字最小 34px**」。原来标题是 **13px**。
+// ⚠️ 第一版把 titleH 默认抬到 46 并做 `max(46, titleH)` —— **那是错的**：
+//   调用方是按旧的 28px 标题栏摆放正文的（正文 y 由调用方自己算），标题栏变高并不会
+//   把正文推下去，结果 34px 的标题溢进正文区 —— 实测段 M 182.9–185.9 每帧 1 处重叠。
+// 正确做法：**titleH 保持调用方给的值**，把标题**裁切在标题栏内**画（`clip()` 之后再 fillText）。
+// 这样对所有调用方都不会溢出，代价是标题上下各被裁掉约 3px（34px 字放进 28px 栏）。
 export function panel(g, x, y, w, h, { title = null, alpha = 1, bg = C.panel, edge = C.panelEdge, r = 8, titleH = 28 } = {}) {
   g.save()
   g.globalAlpha = alpha
@@ -122,17 +128,21 @@ export function panel(g, x, y, w, h, { title = null, alpha = 1, bg = C.panel, ed
     g.clip()
     g.fillStyle = '#25272e'
     g.fillRect(x, y, w, titleH)
+    // 标题：34px（§2.3），超出宽度就截断加 …（「放不下时缩短内容,不缩字号」）
+    g.fillStyle = C.fgDim
+    g.font = MONO(34, 600)
+    g.textAlign = 'left'
+    g.textBaseline = 'middle'
+    let tstr = String(title)
+    const maxTW = w - 24
+    while (tstr.length > 2 && g.measureText(tstr).width > maxTW) tstr = tstr.slice(0, -2) + '…'
+    g.fillText(tstr, x + 12, y + titleH / 2 + 0.5)
     g.restore()
     g.beginPath()
     g.moveTo(x, y + titleH)
     g.lineTo(x + w, y + titleH)
     g.strokeStyle = edge
     g.stroke()
-    g.fillStyle = C.fgDim
-    g.font = MONO(13, 600)
-    g.textAlign = 'left'
-    g.textBaseline = 'middle'
-    g.fillText(title, x + 12, y + titleH / 2 + 0.5)
   }
   g.restore()
 }
@@ -386,7 +396,7 @@ export function warningModal(g, { x, y, w, title, lines = [], alpha = 1, color =
   return h
 }
 
-export function nestedWindow(g, { x, y, w, h, depth = 0, alpha = 1, label = '' }) {
+export function nestedWindow(g, { x, y, w, h, depth = 0, alpha = 1, label = '', labelSize = 36 }) {
   g.save()
   g.globalAlpha = alpha
   roundRect(g, x, y, w, h, 6)
@@ -404,11 +414,13 @@ export function nestedWindow(g, { x, y, w, h, depth = 0, alpha = 1, label = '' }
     g.fill()
   }
   if (label) {
+    // T09 / §1.15：段 N 的两个会话窗口标题要 **≥36px**，所以默认改成 36。
+    // 段 J 的"嵌套窗口套娃"（j_overflow.js）用的是很小的嵌套矩形，显式传 labelSize: 11 保持原样。
     g.fillStyle = C.fgDim
-    g.font = MONO(11, 500)
+    g.font = MONO(labelSize, 500)
     g.textAlign = 'left'
     g.textBaseline = 'middle'
-    g.fillText(label, x + 44, y + 10)
+    g.fillText(label, x + 44, y + Math.max(10, labelSize * 0.5))
   }
   g.restore()
 }

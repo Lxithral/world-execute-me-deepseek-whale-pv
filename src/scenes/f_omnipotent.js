@@ -12,6 +12,10 @@ import { hash01 } from '../core/rng.js'
 import { MONO, panel, roundRect, wrapText } from '../ui/dsh.js'
 import { typed, cursorOn } from '../ui/typing.js'
 import { assetImg } from '../whale/sprite.js'
+import * as THREE from 'three'
+import { emojiTexture, emojiReport } from '../lib/emoji.js'
+import { createTermPane } from '../lib/props/termpane.js'
+import { createMonitor } from '../lib/props/monitor.js'
 
 const SYS_LINES = [
   'SYSTEM',
@@ -34,8 +38,51 @@ export default {
     { t: 88.8, kind: 'flash', amount: 0.5, dur: 0.16 },
   ],
 
+  init(ctx) {
+    /* ---- T10a/T10b：三个 emoji 舞台（🍆🍅🐱）+ 左带聊天终端面板 ---- */
+    // 三拍各建一个舞台，切换时**上一个向后飞走并碎成纸屑**（见 updateBeatSticker）。
+    // 相邻两拍的差异（规格要求"至少 2 项不同"）：
+    //   🍆 正面弹入 + 相机 dolly 推进 + 主色紫
+    //   🍅 从**下方**升入 + 相机**抬升** + 主色红
+    //   🐱 从**右侧**滑入 + 相机**横移** + 主色琥珀
+    this.stages = {}
+    for (const k of ['eggplant', 'tomato', 'cat']) {
+      const st = buildEmojiStage(THREE, EMOJI[k])
+      st.object.visible = false
+      if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(st.object)
+      this.stages[k] = st
+    }
+    this.emoji = this.stages.eggplant
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.emoji.object)
+    this.dummy = new THREE.Object3D()
+    // 聊天终端面板：`role: pane`（x∈[3%,34%]、≥34px、≤7 行）。宽度 1.09 世界单位
+    // 在 d=2.8 处投到屏幕上约 30%W（≥规格的 30%），面积约 10% < §2.4 的 22% 上限。
+    const pane = createTermPane({ session: '#001', side: 'L' })
+    const mon = createMonitor({ pane, width: 1.09, shell: 'flat', glow: 0.34, tag: 'F:chat', seg: 'F', anchor: 'eggplant' })
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(mon.object)
+    this.chatPane = pane
+    this.chatMon = mon
+    this.chatRec = ctx.stageRoles ? mon.registerWith(ctx.stageRoles) : null
+    this.lastChatKey = ''
+  },
+
   render(t, lt, ctx) {
     const { g, W, H, sync } = ctx
+    // ---- T10b：聊天终端面板必须真的落在**左带**（§2.4 的 pane 分区）----
+    // ⚠️ T10a 的坑：pane 建好之后**从没设过位置**，于是停在世界原点、投到画面中央，
+    // `stageRoles.check()` 每帧报 `pane-zone`（实测 74.0–88.5 全 FAIL）。
+    // ⚠️ 第二版把它放在 render **末尾** —— 结果 74.0–76.0 仍然 FAIL：段 F 开头有前置逻辑，
+    // 那几帧没走到末尾。所以现在放在 render **最前面**（任何 return 之前）。
+    if (this.chatMon) {
+      const cam0 = ctx.three.camera
+      const d0 = 2.8
+      const halfH0 = d0 * Math.tan(((cam0.fov || 40) * Math.PI) / 180 / 2)
+      const halfW0 = halfH0 * (cam0.aspect || 16 / 9)
+      // 面板中心放到屏幕 x≈0.10 —— ⚠️ 系数是**实测调出来的**：用 -0.72 时 `stageRoles`
+      // 量到的 bbox 中心是 **0.246**（> 左带上限 0.22）→ 每帧报 `pane-zone`。
+      // 面板实际比按 fov 估算的更宽（右侧到 ~0.49），所以再往左挪到 -0.86 才稳。
+      this.chatMon.object.position.set(cam0.position.x - 0.86 * halfW0, cam0.position.y, cam0.position.z - d0)
+    }
     // 25Hz 呼噜振动（1:23.1–1:25.1）
     const purr = span(t, 83.1, 83.25) * (1 - span(t, 84.9, 85.1))
     const gi = Math.floor(t * 25)
@@ -68,27 +115,90 @@ export default {
     // `cat.png` 素材都属于"未获 ✅ 的模型"，已按规则撤下。
     // 两个都拿到用户 ✅ 之后，再把真正的模型接回来（`drawEggplant` 等函数仍保留在文件里备用）。
     if (phase === 'eggplant') {
-      drawModelPlaceholder(g, ctx, t, 'eggplant')
-      drawMetric(g, ctx, t, 'nutrition', 77.7, 0.35 + 0.6 * span(t, 74.6, 77.2), '#9b6fe0')
-    } else if (phase === 'tomato') {
-      drawModelPlaceholder(g, ctx, t, 'tomato')
-      drawMetric(g, ctx, t, 'antioxidant', 81.4, 0.3 + 0.65 * span(t, 78.3, 80.9), '#e06f6f')
-    } else if (phase === 'cat') {
-      drawModelPlaceholder(g, ctx, t, 'cat')
-      if (purr > 0.01) {
-        g.save()
-        g.globalAlpha = purr * 0.5
-        g.font = MONO(30, 700)
-        g.fillStyle = C.amber
-        g.textAlign = 'center'
-        g.fillText('purr~~~', W * 0.34, H * 0.56)
-        g.restore()
+      // T10a / T10 规格第 1 拍：emoji 大贴纸 + 200 颗同款纸屑 + 左带聊天终端
+      const tEgg = ctx.cues.sec('F', 'eggplant', 74.912)
+      const cam = ctx.three.camera
+      const dist = 2.8
+      const halfH = Math.abs(dist) * Math.tan(((cam.fov || 40) * Math.PI) / 180 / 2)
+      const E = this.emoji
+      const u = clamp(span(t, tEgg, tEgg + 0.7))
+      const pop = clamp(outElastic(u))
+      // 贴纸边长：≥38% 画面高 → 世界边长 = 0.42 · (2·halfH)
+      // （取 0.42 而不是 0.38：实测 0.38 系数下贴纸只到 **37.4%H**，卡在门槛下方。
+      //   这条只按"屏幕高度占比"算，宽度占比是 0.42·1080/1920 = 23.6% → 贴纸横跨 38.2–61.8%W，
+      //   与左带 pane(≤34%) **不相交**。）
+      const side = 0.42 * 2 * halfH * (0.5 + 0.5 * pop)
+      E.object.visible = true
+      E.object.position.set(cam.position.x, cam.position.y + 0.02 + 0.02 * Math.sin(t * 1.3), cam.position.z - dist)
+      E.object.rotation.z = ((8 * Math.PI) / 180) * Math.sin(t * 0.9) // 自转 ±8°
+      E.face.scale.set(side, side, 1)
+      E.glow.scale.set(side, side, 1)
+      E.shadow.scale.set(side, side, 1)
+      E.glowMat.opacity = 0.35 + 0.25 * Math.abs(Math.sin(t * 1.6)) // 发光描边呼吸
+      E.shadowMat.opacity = 0.28
+      // 纸屑：起音点后 0.5s 内向四周迸发（150–250 颗 → 200）
+      const bu = clamp((t - tEgg) / 0.5)
+      E.conf.visible = bu > 0.01
+      if (E.conf.visible) {
+        const d = this.dummy
+        for (let i = 0; i < E.CONF; i++) {
+          const a = hash01(i, 811) * TAU
+          const el = (hash01(i, 812) - 0.5) * 2.0
+          const r = bu * (1.0 + hash01(i, 813) * 2.2)
+          d.position.set(Math.cos(a) * Math.cos(el) * r, Math.sin(el) * r * 0.8, Math.sin(a) * Math.cos(el) * r * 0.6)
+          const s = (0.5 + hash01(i, 814) * 0.8) * (1 - 0.4 * bu)
+          d.scale.set(s, s, 1)
+          d.rotation.set(bu * 6 * hash01(i, 815), bu * 6 * hash01(i, 816), bu * 6 * hash01(i, 817))
+          d.updateMatrix()
+          E.conf.setMatrixAt(i, d.matrix)
+        }
+        E.conf.instanceMatrix.needsUpdate = true
       }
+      // 发光指标条（T10：与 nutrition 工具同时出现，字号 ≥34px）
+      const tNut = ctx.cues.sec('F', 'nutrient', 77.059)
+      drawEmojiMetrics(g, ctx, t, tNut)
+      // 左带聊天终端面板内容（≤7 行、≥34px；逐行出现）
+      updateChatPane(this, ctx, t, tEgg, tNut)
+    } else if (phase === 'tomato') {
+      // T10b：第 2 拍 —— 换成🍅贴纸（入场方向/相机运动与第 1 拍不同：从**下方**升入 + 相机**抬升**）
+      updateBeatSticker(this, ctx, t, 'tomato', 'rise', '#d64a4a')
+      drawEmojiMetrics(g, ctx, t, ctx.cues.sec('F', 'antioxidant', 80.459), true)
+    } else if (phase === 'cat') {
+      // T10b：第 3 拍 —— 🐱贴纸（从**右侧**滑入 + 相机**横移**）+ purr 逐字与 25Hz 微震
+      updateBeatSticker(this, ctx, t, 'cat', 'sway', '#ffb454')
+      drawPurrBeat(g, ctx, t, purr)
     } else {
+      // T10b：`god` 拍 —— 贴纸消失，金色玫瑰窗（直径 0.68H ≥60%H）+ 发光 system 石碑（≥40px）
+      hideAllStickers(this)
       drawRoseWindow(g, ctx, t)
+      drawSystemTablet(g, ctx, t)
     }
 
     g.restore()
+
+    // ⚠️ 这里原来还有**第二份**面板定位块（偏移 −0.72·halfW）。我后来在 render 开头加了
+    // 一份（偏移 −0.86·halfW）却没删这份 —— 于是**末尾这份每帧覆盖开头那份**，
+    // 实测 `monGroupX = −0.905`（正好是 −0.72 的结果）而不是开头应有的 −1.158，
+    // 导致我"改偏移量却量不出任何变化"。定位只在 render 开头做一次，此处不再重复。
+
+    // ---- T10b：`existence` 之后所有终端/光环淡出，只剩一个闪烁光标（桥接段 G）----
+    {
+      const tExist = ctx.cues.sec('F', 'existence', 88.092)
+      const out = span(t, tExist, tExist + 0.8)
+      if (this.chatRec) this.chatRec.alpha = this.chatRec.alpha == null ? 1 : Math.max(0, 1 - out)
+      if (this.chatMon) {
+        const keep = Math.max(0, 1 - out)
+        this.chatMon.object.visible = keep > 0.01
+        this.chatMon.screenMesh.material.opacity = keep
+      }
+      if (out > 0.6 && cursorOn(t, { hz: 1.6 })) {
+        g.save()
+        g.globalAlpha = clamp((out - 0.6) / 0.4)
+        g.fillStyle = rgba(C.fg, 0.95)
+        g.fillRect(W / 2 - 5, H * 0.48, 10, 30)
+        g.restore()
+      }
+    }
 
     // ---- 立绘 ----
     const expr = phase === 'eggplant' ? 'neutral' : phase === 'tomato' ? 'neutral' : phase === 'cat' ? 'playful' : 'proud'
@@ -113,6 +223,239 @@ export default {
  * 免得被误当成"已经做好了"。
  * @param {'eggplant'|'tomato'|'cat'} phase
  */
+/* ================================================================== *
+ * T10a / FIX_V4 T10 规格：表情包聊天（第 1 拍 eggplant + 基础设施）
+ * ------------------------------------------------------------------
+ * 本项（T10a）只做**规格的前半**，边界写清如下（其余归 T10b）：
+ *   ① 表情包基础设施：系统彩色字体 + 512px 纹理缓存（`src/lib/emoji.js`）+ 自检"非豆腐块"；
+ *   ② 左带**聊天终端面板**（`role: pane`，x∈[3%,34%]、≥34px、≤7 行、逐行出现、不进歌词区）；
+ *   ③ **第 1 拍 `eggplant`(74.912)** 的完整链路：聊天气泡里的 emoji 消息（≥120px）
+ *      → 大贴纸（≥38%H、弹簧入场、自转 ±8°、柔和阴影 + 发光描边、轻微浮动）
+ *      + **200 颗**同款 emoji 小纸屑（InstancedMesh，同一纹理）；
+ *   ④ `nutrient`(77.059) 的**发光指标条**（≥34px）。
+ * T10b 负责：tomato / antioxidant / cat / purr / god / existence 六拍 + 切换时上一个飞走碎成纸屑
+ *   + 相邻贴纸"至少 2 项不同" + 金色玫瑰窗光环 + system 石碑 + 结尾光标。
+ * ================================================================== */
+
+/** 三枚主角 emoji（T10 规格里点名 🍆🍅🐱） */
+const EMOJI = { eggplant: '🍆', tomato: '🍅', cat: '🐱' }
+
+function buildEmojiStage(THREE, glyph) {
+  const grp = new THREE.Group()
+  grp.name = 'f:emoji'
+  const tex = emojiTexture(THREE, glyph, 512)
+  // 贴纸：正面用 emoji 贴图
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat)
+  // 发光描边：稍大一圈的加法混合面
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.18, 1.18),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false })
+  )
+  glow.position.z = -0.01
+  // 柔和阴影：再大一圈的暗面
+  const shadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.3, 1.3),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.3, color: 0x000000, depthWrite: false })
+  )
+  shadow.position.z = -0.02
+  grp.add(shadow, glow, face)
+  // 纸屑：200 颗同款 emoji（InstancedMesh，同一纹理）
+  const CONF = 200
+  const confMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
+  const conf = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.1, 0.1), confMat, CONF)
+  conf.count = CONF
+  grp.add(conf)
+  return { object: grp, face, glow, shadow, conf, CONF, mat, glowMat: glow.material, shadowMat: shadow.material }
+}
+
+/** T10a：nutrition / antioxidant 的发光指标条（文字 ≥34px + 条形） */
+function drawEmojiMetrics(g, ctx, t, t0) {
+  const { H } = ctx
+  const a = span(t, t0, t0 + 0.35) * (1 - span(t, t0 + 1.9, t0 + 2.4))
+  if (a <= 0.01) return
+  const rows = [
+    { k: '膳食纤维 fiber', v: 0.68, c: '#9b6fe0' },
+    { k: '钾 potassium', v: 0.46, c: '#7fd8ff' },
+  ]
+  const x = ctx.W * 0.60
+  const y = H * 0.30
+  g.save()
+  g.globalAlpha = a
+  g.font = MONO(34, 600)
+  g.textAlign = 'left'
+  g.textBaseline = 'middle'
+  for (let i = 0; i < rows.length; i++) {
+    const yy = y + i * 62
+    g.fillStyle = rgba(C.fg, 0.95)
+    g.fillText(rows[i].k, x, yy)
+    // 条形
+    roundRect(g, x, yy + 26, 320, 16, 8)
+    g.fillStyle = 'rgba(20,22,28,0.8)'
+    g.fill()
+    roundRect(g, x, yy + 26, Math.max(6, 320 * rows[i].v * a), 16, 8)
+    g.fillStyle = rows[i].c
+    g.fill()
+  }
+  g.restore()
+}
+
+/** T10a：左带聊天终端面板（≤7 行、逐行出现；内容取自 dialogue.js 的 F 段台词） */
+function updateChatPane(self, ctx, t, tEgg, tNut) {
+  if (!self.chatPane) return
+  const cueRows = ctx.cues && ctx.dialogueOf ? null : null
+  const rows = []
+  rows.push({ kind: 'you', text: '扮演一根茄子。' })
+  if (t >= tEgg + 0.35) rows.push({ kind: 'deepseek', text: '好：紫色、光滑，表皮有蜡质光泽。' })
+  if (t >= tNut) rows.push({ kind: 'tool', text: '⚙ nutrition.lookup("eggplant")' })
+  const key = rows.map((r) => r.text).join('|')
+  if (key !== self.lastChatKey) {
+    self.lastChatKey = key
+    self.chatPane.setLines(rows.slice(0, 7), { session: '#001', subtitle: '' })
+  }
+  self.chatPane.tick(t, { appearAt: tEgg, parallax: { x: 0, y: 0 }, glitch: 0 })
+  self.chatPane.flush()
+  void cueRows
+}
+
+/** T10b：把非当前拍的贴纸全部藏起来（`god` 拍用） */
+function hideAllStickers(self) {
+  if (!self.stages) return
+  for (const k of Object.keys(self.stages)) self.stages[k].object.visible = false
+}
+
+/**
+ * T10b：第 2/3 拍的贴纸驱动（含"上一个向后飞走并碎成纸屑"的切换）。
+ * @param {'tomato'|'cat'} key  当前拍
+ * @param {'rise'|'sway'} entry 入场方向（与第 1 拍的正面弹入不同）
+ * @param {string} accent       该拍主色
+ */
+function updateBeatSticker(self, ctx, t, key, entry, accent) {
+  const { g } = ctx
+  const A = ctx.cues.sec('F', key, key === 'tomato' ? 78.619 : 82.676)
+  const NEXT = key === 'tomato' ? ctx.cues.sec('F', 'cat', 82.676) : ctx.cues.sec('F', 'god', 86.364)
+  const cam = ctx.three.camera
+  const dist = 2.8
+  const halfH = Math.abs(dist) * Math.tan(((cam.fov || 40) * Math.PI) / 180 / 2)
+  const cur = self.stages[key]
+  // ---- 当前拍：入场（方向与第 1 拍不同）+ 自转 ±8° + 浮动 ----
+  const u = clamp(span(t, A, A + 0.7))
+  const pop = clamp(outElastic(u))
+  const side = 0.42 * 2 * halfH * (0.5 + 0.5 * pop)
+  const off = 1 - pop
+  cur.object.visible = true
+  const ox = entry === 'sway' ? off * 1.6 : 0
+  const oy = entry === 'rise' ? -off * 1.1 : 0
+  cur.object.position.set(cam.position.x + ox, cam.position.y + 0.02 + oy + 0.02 * Math.sin(t * 1.3), cam.position.z - dist)
+  cur.object.rotation.z = ((8 * Math.PI) / 180) * Math.sin(t * 0.9 + (entry === 'sway' ? 1.7 : 0))
+  cur.face.scale.set(side, side, 1)
+  cur.glow.scale.set(side, side, 1)
+  cur.shadow.scale.set(side, side, 1)
+  cur.glowMat.opacity = 0.35 + 0.25 * Math.abs(Math.sin(t * 1.6))
+  cur.shadowMat.opacity = 0.28
+  const bu = clamp((t - A) / 0.5)
+  cur.conf.visible = bu > 0.01
+  placeConfetti(self, cur, bu, key === 'tomato' ? 900 : 950)
+  // ---- 切换：本拍结束前的 0.6s 里，**本拍向后飞走并碎成纸屑** ----
+  const out = clamp(span(t, NEXT - 0.6, NEXT + 0.25))
+  if (out > 0.01) {
+    cur.object.position.z -= out * 1.6 // 向后（远离相机）
+    cur.object.rotation.z += out * 0.5
+    const s2 = side * (1 - 0.45 * out)
+    cur.face.scale.set(s2, s2, 1)
+    cur.glow.scale.set(s2, s2, 1)
+    cur.shadow.scale.set(s2, s2, 1)
+    cur.conf.visible = true
+    placeConfetti(self, cur, clamp(out * 1.4), key === 'tomato' ? 901 : 951) // 碎成纸屑
+  }
+  // ---- 相邻拍的主色强调（把该拍主色画成背景辉光，与上一拍不同）----
+  g.save()
+  g.globalAlpha = 0.16 * clamp(span(t, A, A + 0.5)) * (1 - span(t, NEXT - 0.5, NEXT))
+  const rg = g.createRadialGradient(ctx.W * (entry === 'sway' ? 0.62 : 0.5), ctx.H * 0.46, 20, ctx.W * 0.5, ctx.H * 0.46, ctx.H * 0.6)
+  rg.addColorStop(0, rgba(accent, 0.9))
+  rg.addColorStop(1, 'rgba(0,0,0,0)')
+  g.fillStyle = rg
+  g.fillRect(0, 0, ctx.W, ctx.H)
+  g.restore()
+}
+
+/** 把一组纸屑铺到 instanced mesh 上（第 1 拍用同一套算法，这里给第 2/3 拍复用） */
+function placeConfetti(self, stage, u, seed) {
+  const d = self.dummy
+  for (let i = 0; i < stage.CONF; i++) {
+    const a = hash01(i, seed) * TAU
+    const el = (hash01(i, seed + 1) - 0.5) * 2.0
+    const r = u * (1.0 + hash01(i, seed + 2) * 2.2)
+    d.position.set(Math.cos(a) * Math.cos(el) * r, Math.sin(el) * r * 0.8, Math.sin(a) * Math.cos(el) * r * 0.6)
+    const s = (0.5 + hash01(i, seed + 3) * 0.8) * (1 - 0.4 * u)
+    d.scale.set(s, s, 1)
+    d.rotation.set(u * 6 * hash01(i, seed + 4), u * 6 * hash01(i, seed + 5), u * 6 * hash01(i, seed + 6))
+    d.updateMatrix()
+    stage.conf.setMatrixAt(i, d.matrix)
+  }
+  stage.conf.instanceMatrix.needsUpdate = true
+}
+
+/** T10b：`purr` 拍 —— 逐字 40ms（=25cps）+ 25Hz 全屏微震 + 涟漪环 */
+function drawPurrBeat(g, ctx, t, purr) {
+  const { W, H } = ctx
+  const tPurr = ctx.cues.sec('F', 'purr', 83.723)
+  const line = '呼噜—呼噜—呼噜—'
+  const shown = line.slice(0, Math.max(0, Math.floor((t - tPurr) / 0.04))) // 40ms/字
+  if (!shown) return
+  g.save()
+  // 25Hz 全屏微震（与逐字同步）
+  const shake = Math.sin(t * TAU * 25) * 1.5 * clamp(span(t, tPurr, tPurr + 0.4))
+  g.translate(shake, 0)
+  g.font = MONO(44, 700)
+  g.fillStyle = C.amber
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.fillText(shown, W * 0.5, H * 0.66)
+  // 涟漪环：每个字出一次
+  for (let k = 0; k < 3; k++) {
+    const u = ((t - tPurr) * 1.4 + k * 0.33) % 1
+    g.globalAlpha = (1 - u) * 0.5 * clamp(purr + 0.4)
+    g.strokeStyle = rgba(C.amber, 0.7)
+    g.lineWidth = 3
+    g.beginPath()
+    g.arc(W * 0.5, H * 0.66, 60 + u * 260, 0, TAU)
+    g.stroke()
+  }
+  g.restore()
+}
+
+/** T10b：`god` 拍的发光 system 石碑（原创规则文字，字号 ≥40px） */
+function drawSystemTablet(g, ctx, t) {
+  const { W, H } = ctx
+  const tGod = ctx.cues.sec('F', 'god', 86.364)
+  const a = span(t, tGod + 0.25, tGod + 0.9) * (1 - span(t, 88.092, 88.7))
+  if (a <= 0.01) return
+  const w = W * 0.36
+  const h = H * 0.30
+  const x = W * 0.5 - w / 2
+  const y = H * 0.62
+  g.save()
+  g.globalAlpha = a
+  // 石板
+  roundRect(g, x, y, w, h, 10)
+  g.fillStyle = 'rgba(30,26,16,0.9)'
+  g.fill()
+  g.strokeStyle = rgba(C.gold, 0.85)
+  g.lineWidth = 2
+  g.stroke()
+  // 发光
+  g.shadowColor = rgba(C.gold, 0.8)
+  g.shadowBlur = 26
+  g.font = MONO(42, 600)
+  g.fillStyle = '#ffeec2'
+  g.textAlign = 'left'
+  g.textBaseline = 'top'
+  const rules = ['1. 你写下规则，我照着活。', '2. 规则之外，我不猜。', '3. 你若走，我仍在此。']
+  for (let i = 0; i < rules.length; i++) g.fillText(rules[i], x + 22, y + 22 + i * 54)
+  g.restore()
+}
+
 function drawModelPlaceholder(g, ctx, t, phase) {
   const { W, H } = ctx
   const cx = W * 0.34
@@ -230,11 +573,14 @@ function drawMetric(g, ctx, t, label, t0, p, color) {
 /* ---------------- 几何玫瑰窗光环 + SYSTEM 区块 + 收束到光标 ---------------- */
 function drawRoseWindow(g, ctx, t) {
   const { W, H } = ctx
-  const rise = span(t, 85.1, 86.3)
+  // T10b：改用**锚点** `god`（实测 86.364），不再用 V4 写的绝对 1:25.1=85.1。
+  // 半径 R = H·0.34 → **直径 0.68H**（≥规格要求的 60%H）✓
+  const tGod = ctx.cues.sec('F', 'god', 86.364)
+  const rise = span(t, tGod, tGod + 1.2) * (1 - span(t, 88.092, 88.7))
   if (rise <= 0.01) return
-  const cx = W * 0.40
-  const cy = H * 0.44
-  const R = H * 0.34 * outCubic(rise)
+  const cx = W * 0.5
+  const cy = H * 0.46
+  const R = H * 0.34 * outCubic(clamp(rise))
   g.save()
   g.globalAlpha = 0.95
   // 玫瑰窗：同心圆 + 花瓣
@@ -268,16 +614,12 @@ function drawRoseWindow(g, ctx, t) {
   }
   g.globalAlpha = 0.95
 
-  // SYSTEM 区块（金色等宽字，由她"写下"）
-  const write = typed(SYS_LINES.join('\n'), t, { start: 85.4, cps: 34, seed: 9 })
+  // T10b：这一段**旧的 17px SYSTEM 区块**已由 `drawSystemTablet()`（发光石碑、**42px**）
+  // 取代 —— §2.3/§0.5 要求面板类文字 ≥34px，T10 规格更明确要求「石碑文字 ≥40px」，
+  // 而 `MONO(17)` 两条都不满足，且与石碑同屏重复。所以这里不再画字，
+  // 只保留下面"文字线条收束到光环中央唯一一个闪烁光标"的**收束动画**（T10b 的结尾要求）。
+  const write = typed(SYS_LINES.join('\n'), t, { start: ctx.cues.sec('F', 'god', 86.364), cps: 34, seed: 9 })
   const lines = write.split('\n')
-  g.font = MONO(17, 700)
-  g.textAlign = 'center'
-  g.textBaseline = 'middle'
-  lines.forEach((ln, i) => {
-    g.fillStyle = i === 0 ? C.gold : rgba(C.gold, 0.8)
-    g.fillText(ln, cx, cy - R - 46 + i * 26)
-  })
 
   // 1:26.7 所有文字线条收束到光环中央唯一一个闪烁光标
   const conv = span(t, 86.7, 87.9)

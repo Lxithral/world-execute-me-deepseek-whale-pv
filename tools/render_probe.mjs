@@ -3,10 +3,9 @@
 // 用法: node tools/render_probe.mjs --url "http://127.0.0.1:5173/" --t 2.0
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { killTree } from './kill_tree.mjs'
 
 const CHROME = [
@@ -18,11 +17,12 @@ const url = arg('url', 'http://127.0.0.1:5173/')
 const T = parseFloat(arg('t', '2.0'))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const port = 10500 + Math.floor(Math.random() * 300)
-const profile = join(tmpdir(), 'dshpv-rp-' + randomBytes(4).toString('hex'))
+// ✅ T24：复用同一个 user-data-dir，且不在本进程里删（见 tools/shoot.mjs 的说明）
+const profile = join(tmpdir(), 'dshpv-chrome')
 mkdirSync(profile, { recursive: true })
 const child = spawn(CHROME, ['--headless=new', '--disable-gpu', '--enable-unsafe-swiftshader', '--use-angle=swiftshader',
   '--no-first-run', '--mute-audio', '--window-size=1280,720', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' })
-const cleanup = () => { killTree(child); try { rmSync(profile, { recursive: true, force: true }) } catch (e) {} }
+const cleanup = () => { killTree(child) }
 
 async function main() {
   let list = null
@@ -31,7 +31,9 @@ async function main() {
   const ws = new WebSocket(page.webSocketDebuggerUrl)
   await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', rej, { once: true }) })
   let id = 0; const pending = new Map()
-  ws.addEventListener('message', (ev) => { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(new Error(m.error.message)) : p.res(m.result) } })
+  // ⚠️ T24 顺手修：这里原来写 `p.res(...)`/`p.rej(...)`，而上面 `pending.set` 存的是
+  // `{ resolve, reject }` → **这个探针一收到 CDP 回包就抛 `p.res is not a function`，从来没跑通过**。
+  ws.addEventListener('message', (ev) => { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result) } })
   const send = (method, params = {}) => new Promise((res, rej) => { const i = ++id; pending.set(i, { resolve: res, reject: rej }); ws.send(JSON.stringify({ id: i, method, params })) })
   const evaluate = async (e) => { const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text); return r.result?.value }
   await send('Runtime.enable'); await send('Page.enable'); await send('Page.navigate', { url })

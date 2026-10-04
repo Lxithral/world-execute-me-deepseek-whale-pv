@@ -25,10 +25,11 @@ import { ANCHORS } from './scenes/anchors.js'
 import { createLyrics, drawLyrics, englishAlpha } from './lyrics/render.js'
 import { ctxAt, tpsAt, statusAt, MONO } from './ui/dsh.js'
 import { setStrict as setTextStrict, listViolations, violationSummary, resetViolations, FONT, resetBBoxes, findTextOverlaps, resetGhostStats, ghostStats, markScreenContext, getBBoxes, textGuardDebug, getTextureReports, clearTextureReports } from './ui/text.js'
+import { emojiReport } from './lib/emoji.js'
 import { createDomUI, uiVisibleAt, windowAt, CONFIG as DSH_CONFIG } from './ui/dom.js'
 import './ui/dsh.css'
 import { SCENES } from './scenes/index.js'
-import { createSwarm, swarmStateAt, SWARM_COUNT, SEGMENT_SWARM, SEGMENT_COLORS, LAYOUT_NAMES } from './lib/swarm.js'
+import { createSwarm, swarmStateAt, swarmCharsAt, SWARM_COUNT, SEGMENT_SWARM, SEGMENT_COLORS, LAYOUT_NAMES } from './lib/swarm.js'
 import { createSwarm2D } from './lib/swarm2d.js'
 import { selfCheck as propsSelfCheck, PROP_KINDS, createProp } from './lib/props/index.js'
 import { codeWall } from './lib/codewall.js'
@@ -245,10 +246,24 @@ function renderAt(t) {
     comp.renderThree(t, {
       dispersion: fx.dispersion(t) * 0.45,
       glitch: fx.glitch(t),
-      radial: Math.min(1, imp * 0.8 + sync.rmsAt(t) * 0.25),
+      // ⚠️ 这里做过一次"径向模糊上限"的**实验**（把 1 收到 0.35），用来验证 0:16/0:18 的四角尖峰
+      // 是不是径向模糊造成的 —— 实测四角数值**一字未变**（仍 0.232/0.218），所以**已撤回**，
+      // 不留没有依据的改动。结论见 docs/REVIEW_T14a.md 的"未解决"一节。
+      // ⚠️ T19c 补记：那次实验**其实无效** —— 当时 post3d 把逐帧 uniforms 写错了对象，
+      // `uRadial` 恒为 0（见 post3d.js 的 T19c 注释），所以"改 radial 没变化"是必然的，
+      // 不能作为"径向模糊无关"的证据。下面两个参数是 T19c 接线修好后按**实测**重定的。
+      // FIX.md §2.4 写的是"impact 联动：**色散 +2px**"、径向模糊"强度由 rms 驱动"：
+      // shader 里 `off = uAberr * 0.0022`（UV）→ 1920 宽下 1.0 ≈ 4.2px。
+      // 旧式 `1.2 + imp*6 + rms*1.5`（≈2.0–7.2）会给到 **9–30px** 的 RGB 错位，
+      // 实测把 b) 的边缘密度从 0.054 压到 0.026（色散把亮度边全糊掉了）→ 改成 ≈0.6px 常驻 + 冲击时 ≈2px。
+      radial: Math.min(0.28, sync.rmsAt(t) * 0.6),
       vignette: 0.34 + 0.22 * fx.crt(t).level * 0,
-      aberration: 1.2 + imp * 6 + sync.rmsAt(t) * 1.5,
-      bloom: 0.36 + imp * 0.6 + fx.burst(t) * 0.35,
+      aberration: 0.15 + imp * 0.45 + sync.rmsAt(t) * 0.15,
+      // ⚠️ T14 追加项：**给 bloom 加上限 0.7**。
+    // 原式 `0.36 + imp*0.6 + fx.burst(t)*0.35` 最大可达 **1.31**；段 B 是纯器乐、起音密集，
+    // 强 onset 的 `imp` 把 bloom 顶到接近上限，叠在暗青底上就是**无色相的整屏泛光**
+    // —— 这正是 T02 的 v) 在 **0:16 / 0:18 量到四角 0.22、颜色约 #3a3a3a** 的成因。
+    bloom: Math.min(0.7, 0.36 + imp * 0.6 + fx.burst(t) * 0.35),
       bloomRadius: 0.6 + imp * 0.25,
       scan: 0.22,
       exposure: expo,
@@ -351,9 +366,13 @@ function applySwarm(t) {
   }
   const st = swarmStateAt(t)
   const visible = layerMask.swarm && t < SWARM_CLEAR_AT
+  // ⚠️ T16b / FIX_V4 §1.4：「本段蜂群**不使用字符形态**」（段 C）。
+  // 3D 层的每个粒子都是**字形**（`aGlyph` + 图集 uv），所以段 C 期间把它关掉；
+  // 2D 层是方形 Points（点/短横），保留 —— 段 C 自己的 `THREE.Points` 圆点云才是主角。
+  const charsOn = swarmCharsAt(t)
   // 3D 层：真实透视里的粒子（自检 n 的三角形数主要来源）
-  swarm.object.visible = visible
-  if (visible) {
+  swarm.object.visible = visible && charsOn
+  if (visible && charsOn) {
     swarm.update(t, {
       camera: comp.camera,
       alpha: st.alpha,
@@ -460,7 +479,10 @@ function applyWhale(t) {
 function drawHud(g, t) {
   const pct = ctxAt(t)
   // 段 J 溢出：中央巨字（沿用 DIRECTOR 的 ≥200px 要求），到 100% 时更红更抖
-  if (t >= 129.0 && t < 147.9) {
+  // ⚠️ T12 / §1.9：窗口止于 **146.5**（黑场起点），不再到 147.9 ——
+  // 规格明写「2:26.5–2:27.9 的黑场里……**不要 % 数字、不要 context 字样、不要任何别的文字**」。
+  // 原来画到 147.9，于是黑场里混着 `100%` 与 `context`，与 §1.9 直接冲突。
+  if (t >= 129.0 && t < 146.5) {
     // 注意：main.js 里 ease / rng 是命名空间导入，必须写 ease.clamp / rng.hash01。
     // 之前这里直接写 clamp(…) 会抛 ReferenceError，被 try/catch 吞掉，
     // 于是 §5.3 要求的"段 J 中央巨字"整段都没画出来。
@@ -477,7 +499,8 @@ function drawHud(g, t) {
     g.shadowBlur = 24
     g.fillText(`${Math.round(pct)}%`, W / 2, H * 0.44)
     g.shadowBlur = 0
-    g.font = `600 28px ${FONT.sans}`
+    // T12 / §1.8 J4：其下的小号 context 标签要求**字号 ≥40px**（原为 28px）。
+    g.font = `600 40px ${FONT.sans}`
     g.fillStyle = rgba(C.fgDim, 0.85)
     g.fillText('context', W / 2, H * 0.44 + size * 0.62)
     g.restore()
@@ -788,6 +811,8 @@ async function boot() {
     findTextOverlaps,
     /** T03 / §2.3：**贴图内部**文字的重叠与字号报告（每次烘焙结算一次，见 text.js 的 setTextureSpace） */
     textureReports: getTextureReports,
+    /** T10a：emoji 自检出口（逐枚色相簇 + 并集），供 ?selftest 的 w) 与探针使用 */
+    emojiReport: () => emojiReport(['🍆', '🍅', '🐱']),
     clearTextureReports,
     setTextStrict,
     lyricY: LYRIC_Y,
@@ -1500,7 +1525,8 @@ const scanCtx = scanCv.getContext('2d', { willReadFrequently: true })
  */
 const EXEMPT = [
   [0.0, 0.85], // 段 A 的 CRT 开机亮线（DIRECTOR 有意）
-  [68.4, 68.9], // 段 E 巨大 ▶ 的闪白
+  [48.4, 51.6], // 段 D 眼睑合拢→全黑→睁眼（§1.5「最后全黑」；T17a 已验证）——T19c 按实测登记，与 EXPOSURE_WINDOWS 同源
+  [69.40, 69.72], // 段 E 巨大 ▶ 的闪白（T19b：按词锚点 execution=69.41 对齐；旧值 68.4–68.9 早 1s，与 EXPOSURE_WINDOWS 同源）
   [146.45, 147.95], // 段 J 2:26.5 黑场 + 红字
   [161.8, 162.2], // 段 K 12/12 白场
   [205.9, 206.5], // 段 N 3:25.96 定格闪白
@@ -1765,13 +1791,17 @@ async function runSelftest() {
     scan = await scanFilm(stride, (i, n) => renderSelftestPanel([...lines, '扫描中… ' + i + '/' + n]))
     const bad = []
     for (const r of scan) {
-      if (r.exempt) continue
+      // ⚠️ T19c 口径对账：§6 明写「允许的豁免：**闪白**与黑场区间」，而 b)/u) 原来只豁免
+      // `EXEMPT_WINDOWS` 里**写死**的那几个闪白时刻 —— 于是任何"声明了闪白但不在那张表里"的帧
+      // （例如段 K 开场 148.0 的 flash 0.613）会被拿去判密度/亮度。v) 早就是按 `fx.flash(t)` 动态豁免的，
+      // 这里与 v) 及 §6 原文对齐：**声明闪白生效的帧一律跳过**（阈值 18%/25%/4% 一字未动）。
+      if (r.exempt || r.flash > 0.02) continue
       const need = r.instrumental ? 0.25 : 0.18
       if (r.nonMode < need || r.edge < 0.04) {
         bad.push(`${r.t}s(${r.seg}) ${(r.nonMode * 100).toFixed(0)}%/${(r.edge * 100).toFixed(1)}%`)
       }
     }
-    const floor = scan.filter((r) => !r.exempt && r.nonMode < 0.08)
+    const floor = scan.filter((r) => !r.exempt && r.flash <= 0.02 && r.nonMode < 0.08)
     await say(
       'b 画面密度',
       bad.length === 0,
@@ -2188,7 +2218,8 @@ async function runSelftest() {
     let skipped = 0
     const segs = new Map()
     for (const r of scan) {
-      if (r.exposureExempt) {
+      // T19c：与 b)/v) 及 §6 原文对齐 —— 声明闪白生效的帧（`fx.flash(t) > 0.02`）也一并跳过
+      if (r.exposureExempt || r.exempt || r.flash > 0.02) {
         skipped++
         continue
       }
@@ -2220,6 +2251,24 @@ async function runSelftest() {
     )
   } catch (e) {
     await say('u 曝光', false, String(e && e.message))
+  }
+  await yieldNow()
+
+  // ---- w) emoji 非豆腐块（T10a / T10 规格）：并集色相簇 ≥3 ----
+  // 「emoji 没有渲染成豆腐块（≥3 个色相簇），否则 FAIL 并报告」。
+  // 判据见 `src/lib/emoji.js` 的 `emojiHueClusters`：丢掉近灰像素（豆腐块的边框就是近灰），
+  // 其余按色相投 12 桶，占彩色像素 ≥2% 的桶才算一簇。豆腐块 → 0 簇。
+  try {
+    const rep = emojiReport(['🍆', '🍅', '🐱'])
+    const ok = rep.unionClusters >= 3
+    await say(
+      'w emoji 非豆腐块',
+      ok,
+      `${ok ? '' : '⚠️ 可能渲染成豆腐块：'}并集色相簇 ${rep.unionClusters}（须 ≥3）` +
+        `；逐枚 ${rep.per.map((p) => `${p.glyph}${p.clusters}簇/${p.colored}px`).join(' ')}`
+    )
+  } catch (e) {
+    await say('w emoji 非豆腐块', false, String(e && e.message))
   }
   await yieldNow()
 

@@ -80,7 +80,10 @@ export function drawCodeBlock(g, x, y, shown, { size = 15, alpha = 1, lh = 1.65,
     if (gutter) {
       g.font = MONO_F(size, 500)
       g.fillStyle = rgba(C.fgDim, 0.5)
-      g.fillText(String(i + 1).padStart(2, ' '), x - 30, yy)
+      // T07b：行号槽原来写死 `x - 30`（按 14–15px 定的）。字号抬到 34px 后
+      // `" 2"` 宽约 41px，会从 x-30 一直压到 x+11 —— 与正文重叠（实测 IoU 0.118）。
+      // 改成按字号比例（size*2.2：14px→30.8 与原值一致，34px→74.8 不再压字）。
+      g.fillText(String(i + 1).padStart(2, ' '), x - Math.round(size * 2.2), yy)
     }
     if (color) {
       g.font = MONO_F(size, 500)

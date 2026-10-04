@@ -22,7 +22,10 @@ export const TEXT_MIN = {
   // FIX_V3 §2.2 明确写「正文等宽 ≥30px」。这一档是给 3D 终端屏（TermPane）用的：
   // 它是**等宽终端正文**，不是 UI 正文，所以下限取 30 而不是 34。
   // 注意这不等于放宽 ui 档 —— ui 仍是 34，只是终端屏走自己的档。
-  term: 30,
+  // T03b / FIX_V4 §2.3 明确写「**面板类文字最小 34px**」，优先于 FIX_V3 §2.2 的「等宽正文 ≥30px」。
+  // 所以 term 档从 30 提到 34（这是**收紧**门槛，不是放宽）；termpane.js 的版式已同步
+  // （BODY_PX 30→34、LINE_H 44→48，MAX_LINES 仍是 7，7×48+TITLE_H 56 仍放得下 640 高）。
+  term: 34,
   codeDeco: 26, // 背景装饰代码
   codeWall: 40, // 代码墙主体
   formula: 80, // 公式
@@ -158,8 +161,14 @@ export function text(g, str, x, y, opts = {}) {
     recordWithTransform(g, bx, by, w, px * 1.16, { layer: lay, role, text: String(str).slice(0, 24), ghost, size: px })
   }
 
+  // T03b：宽度必须在 `g.restore()` **之前**量。
+  // `restore()` 会把 `font` 还原成调用前的环境字体，之后再 `measureText` 得到的是
+  // 「用错字体」的宽度；而 `codewall.js` 正是用 `const w = text(...); x += w` 推进排版 ——
+  // 返回值偏小 → 整行 token 全挤在行首互相压住。这就是 §1.2「代码叠成一团」的根因，
+  // 由 T03 的纹理扫描坐实（7 块贴图 1933 对 IoU>0.1）。
+  const outW = g.measureText(String(str)).width
   g.restore()
-  return g.measureText(String(str)).width
+  return outW
 }
 
 /* ------------------------------------------------------------------ *

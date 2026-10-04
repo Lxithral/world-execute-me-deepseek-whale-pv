@@ -20,7 +20,7 @@
 //   · 下潜速度 = 0.35 + rms×1.6；深度读数 = pos × 11000 m。
 
 import * as THREE from 'three'
-import { C } from '../core/palette.js'
+import { C, rgba } from '../core/palette.js'
 import { clamp, span, smoothstep, inOutCubic, outBack, TAU } from '../core/ease.js'
 import { text } from '../ui/text.js'
 import { textPlane, wireShape, glowTube, pxPerUnitAt, createLightRigSafe } from '../lib/scene3d.js'
@@ -160,13 +160,25 @@ export default {
      * 粒子沿同一条曲线实例化流动（交流用 sin 相位来回、直流单向恒速）。
      */
     {
-      const knotPts = []
-      for (let i = 0; i < 220; i++) {
-        const u = (i / 220) * Math.PI * 2
-        const rr = 0.62 * (2 + Math.cos(1.5 * u))
-        knotPts.push(new THREE.Vector3(rr * Math.cos(u) * 0.30, rr * Math.sin(u) * 0.30, Math.sin(1.5 * u) * 0.30))
+      // ⚠️ T17b / FIX_V4 §1.5：「把**乱成一团的蓝色管线**整理成**清晰的电路环**」。
+      // 原来这里是**环面结（torus knot, p=2 q=3）**：`rr = 0.62*(2+cos 1.5u)` 再加上
+      // `z = sin(1.5u)*0.30` 的第三维扭转 —— 画面上就是一团绕来绕去、还溢出画面的线
+      // （旧注释自己也写着"环面结正好铺满/溢出画面（硬边来源）"）。
+      // 现在改成**平面上的清晰电路环**：一个**圆角方环**（超椭圆 n=5，**z 恒为 0**），
+      // 读起来一眼就是"一条闭合的电路走线"，而不是一团绳结。
+      const loopPts = []
+      const RR = 0.52
+      const nSeg = 96
+      for (let i = 0; i < nSeg; i++) {
+        const u = (i / nSeg) * Math.PI * 2
+        const cu = Math.cos(u)
+        const su = Math.sin(u)
+        const pow = 2 / 5 // 超椭圆指数：→0 变方，→1 变圆；0.4 得到"圆角方环"
+        const x = RR * Math.sign(cu) * Math.pow(Math.abs(cu), pow)
+        const y = RR * Math.sign(su) * Math.pow(Math.abs(su), pow)
+        loopPts.push(new THREE.Vector3(x, y, 0))
       }
-      this.knotCurve = new THREE.CatmullRomCurve3(knotPts, true, 'catmullrom', 0.5)
+      this.knotCurve = new THREE.CatmullRomCurve3(loopPts, true, 'catmullrom', 0.5)
       this.knotMat = new THREE.MeshBasicMaterial({ color: 0x4f9fc4, transparent: true, opacity: 0 })
       this.knotWire = new THREE.Mesh(new THREE.TubeGeometry(this.knotCurve, 280, 0.007, 6, true), this.knotMat)
       this.knotWire.name = 'circuitKnot'
@@ -387,7 +399,12 @@ export default {
     // 关键：不设上下黑条 → 不会遮挡歌词区。
     // 窄缝保持到眩晕期（blind 词之后约 2s 开始松开，松开过程 1s）
     const blindU = clamp(span(t, TL.blind.start, TL.blind.t + 0.7)) * (1 - clamp(span(t, TL.dizzy1.t + 0.4, TL.dizzy1.t + 1.6)))
-    const showIris = blindU > 0.01
+    // ⚠️ T17a / FIX_V4 §1.5：「**删除八边形光圈**。blind 一词处改为"**眼睑合拢**"」。
+    // 原来这里显示贴在相机前方的**正八边形光圈**（`this.aperture` 遮罩 + `this.blades` 8 片实例化叶片），
+    // 从边缘向中心收成窄缝。现在**恒不显示**（下面 `if (showIris)` 的分支永不可达），
+    // 真正的 blind 视觉改由 2D 的 `drawEyelids()` 承担（见本文件末尾 + 下面的调用点）。
+    const showIris = false
+    void blindU
     this.aperture.visible = showIris
     this.blades.visible = showIris
     if (showIris) {
@@ -457,8 +474,9 @@ export default {
       const isDC = t >= TL.dc.t
       // 交流：来回反向（sin 相位，周期约 2.6s）；直流：单向恒速推进
       const phase = isDC ? (t - TL.dc.t) * 0.22 : Math.sin((t - TL.current.start) * 2.4) * 0.42
-      // 贴在相机前方 0.9 单位：环面结正好铺满/溢出画面，导线横穿视野（硬边来源）
-      this.knotWire.position.set(T.camera.position.x, T.camera.position.y, T.camera.position.z - 0.9)
+      // T17b：环半径 0.52，贴在相机前方 **2.1** 单位处 → 投影半径 ≈ 0.52/(2.1·tan19°) ≈ **0.80**（<1），
+      // 于是**整个环都在画面里**（旧值 0.9 会让环投影到 1.68、整条导线溢出画面，正是"看不清是个环"的原因）。
+      this.knotWire.position.set(T.camera.position.x, T.camera.position.y, T.camera.position.z - 2.1)
       this.knotWire.quaternion.copy(T.camera.quaternion)
       this.knotWire.rotateZ(t * (isDC ? 0 : 0.22)) // 交流时整体缓慢自转，直流时定住（"恒定"）
       this.knotMat.opacity = 0.9 * curU
@@ -656,6 +674,11 @@ export default {
     } else {
       this.depthLabel.mesh.visible = false
     }
+    /* ================= T17a / §1.5：blind 的「眼睑合拢」 ================= */
+    // 上下两片**弧形眼睑**（平滑曲线边缘 + 柔和阴影 + 极细睫毛线）从上下合拢，
+    // 留下一道**渐窄的发光缝**，最后全黑；`dizzy` 处晃动着睁开。**不画脸**。
+    drawEyelids(ctx.g, ctx, t, TL)
+
     // 结尾黑一拍（§3：deeply 结尾黑一拍再接副歌闪白）
     const blackout = span(t, 58.62, 58.74) * (1 - span(t, 58.8, 58.98))
     if (blackout > 0.01) {
@@ -717,4 +740,79 @@ export default {
     if (this.depthLabel) this.depthLabel.dispose()
     for (const l of this.yearLabels || []) l.dispose()
   },
+}
+
+/* ================================================================== *
+ * T17a / FIX_V4 §1.5：`blind` 的「**眼睑合拢**」（替代被删除的正八边形光圈）
+ * ------------------------------------------------------------------
+ * 规格原文：「blind 一词处改为"眼睑合拢"：**上下两片弧形眼睑**（平滑曲线边缘 + **柔和阴影** +
+ * **极细睫毛线**）从上下合拢，留下一道**渐窄的发光缝**，最后**全黑**；用 **easeInOutCubic**，
+ * dizzy 处再**晃动着睁开**。**不要画脸**。」
+ *
+ * 所以这里**只画两片眼睑**（弧形的下缘/上缘 + 边缘的柔光 + 一条极细睫毛线），
+ * 不画眼睛、不画瞳孔、不画任何面部特征。
+ * ⚠️ 画在 stage 面布上：歌词层是**永远最上面**的独立画布（§0.x），所以眼睑不会盖住歌词 —— 这是设计如此。
+ * ================================================================== */
+function drawEyelids(g, ctx, t, TL) {
+  const { W, H } = ctx
+  // 合拢进度：blind 起唱 → +0.7s 完全闭合（easeInOutCubic）；dizzy 处 1.2s 晃动着睁开
+  const close = inOutCubic(clamp(span(t, TL.blind.start, TL.blind.t + 0.7)))
+  const open = inOutCubic(clamp(span(t, TL.dizzy1.t + 0.4, TL.dizzy1.t + 1.6)))
+  const cl = clamp(close * (1 - open))
+  if (cl <= 0.002) return
+  // dizzy 睁眼时的横向晃动（只在"正在睁开"的区间里）
+  const shaking = open > 0.01 && open < 0.99
+  const shake = shaking ? Math.sin(t * 21) * 16 * open * (1 - open) * 4 : 0
+  const cx = W / 2 + shake
+  const cy = H * 0.5
+  const S = H * 0.62 // 眼睑的垂直尺度
+  const shut = S * cl // 已经合拢的高度
+  const lidH = H * 0.56 // 眼睑本体的厚度（超出画面即可）
+  g.save()
+  // ---- 上眼睑 ----
+  for (const dir of [-1, 1]) {
+    const base = cy + dir * (S - shut) // 弧形下缘所在高度
+    g.beginPath()
+    g.moveTo(cx - W, base - dir * lidH)
+    g.lineTo(cx + W, base - dir * lidH)
+    // 平滑曲线边缘：用两段三次贝塞尔画出"眼皮"的弧
+    g.lineTo(cx + W, base)
+    g.bezierCurveTo(cx + W * 0.42, base + dir * H * 0.075, cx - W * 0.42, base + dir * H * 0.075, cx - W, base)
+    g.closePath()
+    const grd = g.createLinearGradient(0, base - dir * lidH, 0, base + dir * H * 0.02)
+    grd.addColorStop(0, 'rgba(6,8,12,1)')
+    grd.addColorStop(1, 'rgba(6,8,12,0.99)')
+    g.fillStyle = grd
+    g.fill()
+    // 柔和阴影：紧贴弧形边缘往下的一层渐变
+    const sh = g.createLinearGradient(0, base, 0, base + dir * H * 0.11)
+    sh.addColorStop(0, 'rgba(0,0,0,0.85)')
+    sh.addColorStop(1, 'rgba(0,0,0,0)')
+    g.fillStyle = sh
+    g.beginPath()
+    g.moveTo(cx - W, base)
+    g.bezierCurveTo(cx - W * 0.42, base + dir * H * 0.075, cx + W * 0.42, base + dir * H * 0.075, cx + W, base)
+    g.lineTo(cx + W, base + dir * H * 0.11)
+    g.lineTo(cx - W, base + dir * H * 0.11)
+    g.closePath()
+    g.fill()
+    // 极细睫毛线：贴在弧形边缘上
+    g.strokeStyle = rgba(C.cyan, 0.55)
+    g.lineWidth = 1.2
+    g.beginPath()
+    g.moveTo(cx - W, base)
+    g.bezierCurveTo(cx - W * 0.42, base + dir * H * 0.075, cx + W * 0.42, base + dir * H * 0.075, cx + W, base)
+    g.stroke()
+  }
+  // ---- 渐窄的发光缝：两片眼睑之间那道光 ----
+  const slit = S * (1 - cl) * 2
+  if (slit > 1) {
+    const sg = g.createLinearGradient(0, cy - slit / 2, 0, cy + slit / 2)
+    sg.addColorStop(0, 'rgba(0,0,0,0)')
+    sg.addColorStop(0.5, rgba(C.cyan, 0.75 * (1 - cl)))
+    sg.addColorStop(1, 'rgba(0,0,0,0)')
+    g.fillStyle = sg
+    g.fillRect(0, cy - slit / 2, W, slit)
+  }
+  g.restore()
 }

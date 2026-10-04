@@ -517,10 +517,26 @@ function buildGate(ringRadius = 2.05) {
       grp.scale.setScalar((1 + flash * 0.5) * (1 + 1.9 * env.disE))
       core.rotation.z = t * 0.22
       halo.rotation.z = -t * 0.13
-      coreMat.opacity = (0.72 + 0.28 * env.beatPulse + flash * 0.6) * f
-      halo.material.uniforms.uAlpha.value = (0.30 + 0.45 * env.beatPulse + flash * 0.9) * f
+      // ⚠️ T14b：**四角亮度尖峰的根因 = 门环**。
+      // 实测（240×135 口径，四角各 24×13 的平均亮度）：t=16.0 四角 **0.232**；
+      // 把门环的材质 `visible=false` 之后立刻掉到 **0.026**（隐藏光柱/穹顶只到 0.023/0.026，无关）。
+      // 成因：半径 2.05 的环在离相机 d≈3.2–5.6 时，**环缘正好扫过画面的左右/上下边**，
+      // 而 `halo` 是一层**大范围柔光**，于是四角被均匀照亮 ≈ #3a3a3a。
+      // 修法：**把 halo 压得多、core 压得少** —— 细亮环（core）才是"发光门环"的读感，
+      // 宽柔光只是氛围；这样既清掉四角超标，又保留规格要的"发光门环隧道"。
+      // 实测各档对四角的效果（t=16.0）：原始 **0.232** → halo×0.3 **0.212** → 再加 core×0.85 **0.212**
+      // → `rimDim` 定点压制 **0.212（无效：该帧 ndcR≈11，环极近、管壁扫过四角，高斯凹陷不在此处）**
+      // → **core×0.42 后 0.10x**（清到门槛 0.12 以下）。代价：门环整体更暗，换来 §2.4 的 v) 达标。
+      // ⚠️ T19c 续修：上面这一档（core×0.28 / halo×0.3 / studs×0.6）是在**§6 曝光惰性**
+      // （`uExposure` 恒为 1.0）时定的。T19c 修好 post3d 的 uniforms 接线后，段 B 的曝光
+      // 关键帧（1.62/1.48）**真的生效了** ⇒ 同一片门环在屏上又被乘亮 1.57×，
+      // 实测 t=16.0 四角从 0.117 涨到 **0.153 > 0.12**（正是 T14b 警告过的"余量只剩 0.003"）。
+      // 这里按曝光倍率做**反比补偿**（1/1.57 ≈ 0.64）：门环在屏上的亮度**回到 T14b 验证时的水平**，
+      // 而画面其余部分照 §6 的要求被提亮 —— 不是把门槛挪走。
+      coreMat.opacity = (0.72 + 0.28 * env.beatPulse + flash * 0.6) * f * 0.179
+      halo.material.uniforms.uAlpha.value = (0.30 + 0.45 * env.beatPulse + flash * 0.9) * f * 0.192
       halo.material.uniforms.uSpin.value = t * 1.3
-      studMat.opacity = 0.85 * f
+      studMat.opacity = 0.85 * f * 0.384
     },
   }
 }
@@ -858,6 +874,64 @@ function buildMandelbrot() {
 }
 
 /** ⑥ 波包：高斯包络 × 余弦载波（真实表达式），用点阵显示振幅 */
+/**
+ * T14 / §1.3：**波干涉曲面（3D 网格起伏）**。
+ * 规格把"波干涉曲面"与"波包"分开列，而段 B 原来只有 `buildPacket()`（轴上 88 颗珠子的波包）
+ * 和它的公式标签 —— 没有真正的干涉曲面。这里补一张真正的**网格曲面**：
+ * 两个点源 `sin(k·r − ωt)` 叠加成起伏，**同一份 position 属性**同时喂给
+ * `LineSegments`（发光线条）与 `Points`（粒子），于是曲面动、线与粒子一起动。
+ */
+function buildWaveInterference() {
+  const SEG_X = 40
+  const SEG_Y = 28
+  const W = 1.9
+  const Hh = 1.3
+  const geo = new THREE.PlaneGeometry(W, Hh, SEG_X, SEG_Y)
+  const pos = geo.attributes.position
+  const baseXY = new Float32Array(pos.count * 2)
+  for (let i = 0; i < pos.count; i++) {
+    baseXY[i * 2] = pos.getX(i)
+    baseXY[i * 2 + 1] = pos.getY(i)
+  }
+  // 网格线：复用**同一份** position 属性 → 顶点一动，线与粒子同步（不必重建几何）
+  const idx = []
+  const rowSize = SEG_X + 1
+  for (let r = 0; r <= SEG_Y; r++) for (let c = 0; c < SEG_X; c++) idx.push(r * rowSize + c, r * rowSize + c + 1)
+  for (let c = 0; c <= SEG_X; c++) for (let r = 0; r < SEG_Y; r++) idx.push(r * rowSize + c, (r + 1) * rowSize + c)
+  geo.setIndex(idx)
+  const lineMat = addMat('#7fe0d0', 0.5)
+  const lines = new THREE.LineSegments(geo, lineMat)
+  lines.frustumCulled = false
+  const pmat = new THREE.PointsMaterial({
+    size: 0.02,
+    color: 0xa8fff0,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+  })
+  const pts = new THREE.Points(geo, pmat)
+  pts.frustumCulled = false
+  const grp = new THREE.Group()
+  grp.name = 'b:waveint'
+  grp.add(lines, pts)
+  return {
+    object: grp,
+    update(t) {
+      for (let i = 0; i < pos.count; i++) {
+        const x = baseXY[i * 2]
+        const y = baseXY[i * 2 + 1]
+        const r1 = Math.hypot(x - 0.52, y - 0.28)
+        const r2 = Math.hypot(x + 0.60, y + 0.32)
+        const z = 0.105 * Math.sin(9.0 * r1 - 5.0 * t) + 0.09 * Math.sin(9.0 * r2 - 5.0 * t + 1.1)
+        pos.setZ(i, z)
+      }
+      pos.needsUpdate = true
+    },
+  }
+}
+
 function buildPacket() {
   const grp = new THREE.Group()
   grp.name = 'b:packet'
@@ -1422,6 +1496,8 @@ export default {  id: 'B',
       ['galaxy', 7, 3.35, -0.3, [3.4, 2.3], '#b48cff'],
       ['blackhole', 8, 3.35, 0.28, [3.5, 2.3], '#ffb454'],
       ['heart', 11, 2.15, 0.3, [1.5, 1.3], '#ff8fa3'],
+      // T14 / §1.3：补上规格点名但一直缺失的**波干涉曲面（3D 网格起伏）**
+      ['waveint', 10, 2.85, 0.36, [3.1, 1.8], '#7fe0d0'],
       // ⚠️ FIX_V4 §1.3 明令删除下面这排（我上一轮按 FIX_V3 §7 B 的"§5 编号模型 ≥10 种"加的
       //   clock / toggle / torusknot / mobius / platonic / monitor 六件），
       //   并明确「**删除展馆里那排带橙/青外框的小道具**（钟表、开关、环面结、莫比乌斯带、
@@ -1440,6 +1516,7 @@ export default {  id: 'B',
       galaxy: buildGalaxy,
       blackhole: buildBlackHole,
       heart: () => buildHeart(renderer),
+      waveint: buildWaveInterference,
     }
     this.exhibits = []
     for (let n = 0; n < PLAN.length; n++) {
@@ -1617,7 +1694,14 @@ export default {  id: 'B',
       if (!vis) continue
       gate.object.position.set(camX * 0.5, 0, z)
       const fl = Math.abs(t - gate.t0) < 0.35 ? gflash : 0
-      gate.update(t, env, f, fl)
+      // ⚠️ T14b 定点修正：**只在"环缘正好扫过画面边"时压暗**。
+      // 半径 2.05 的环在 `dist ≈ 3.2–5.6` 时，环缘落在画面左右/上下边附近，四角被均匀照亮
+      // （实测 t=16.0 四角 0.232、t=18.0 0.218；把门环整体隐藏则掉到 0.026）。
+      // 环的**竖向投影半径** `ndcR = R/(dist·tan(fov/2))`，`ndcR≈1` 就是"环缘贴着上下边"。
+      // 用一个高斯凹陷只在那一刻压暗 —— 环很大（冲进隧道）或很小（远处）时都不动，保住观感。
+      const ndcR = 2.05 / Math.max(0.2, dist * Math.tan(((cam.fov || 40) * Math.PI) / 180 / 2))
+      const rimDim = 1 - 0.72 * Math.exp(-Math.pow((ndcR - 1) / 0.35, 2))
+      gate.update(t, env, f * rimDim, fl)
     }
 
     /* ---------------- ⑤ 展品（含展位 / 标牌 / 溶解） ---------------- */

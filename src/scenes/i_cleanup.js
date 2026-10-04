@@ -3,6 +3,7 @@
 // 2:03.0 她打开 system 提示文件试图修改；2:05.7 光标写入；2:07.7 权限弹窗 permission denied；
 // 2:09.0 非法参数的红色弹窗堆叠（每个落一个起音点）。
 
+import * as THREE from 'three'
 import { C, rgba } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
@@ -10,6 +11,7 @@ import { MONO, panel, permissionDialog, warningModal, fileTree, progressBar, rou
 import { typed, cursorOn } from '../ui/typing.js'
 import { text, FONT } from '../ui/text.js'
 import { streamLines, drawCodeBlock, SYSTEM_PROMPT } from '../lib/code.js'
+import { textPlane } from '../lib/scene3d.js'
 import { ctxAt } from '../ui/dsh.js'
 
 const ILLEGAL = [
@@ -75,10 +77,179 @@ export default {
         tok: TOKENS[i % TOKENS.length],
       })
     }
+
+    /* ================================================================== *
+     * T22a①：§7 I「**此前所有模型炸成实例化碎片被扫走**」
+     * 段 I 此前只有 2D token 被横扫（那些 token 是"上下文碎片"，不是"模型碎片"）。
+     * 这里补上真正的 3D：**两组 InstancedMesh**（四面体 + 立方体，共 320 片，逐实例颜色），
+     * 从中心炸开后铺开成云；再由 delete 扫描线按**左→右的波前**逐片扫掉（与 2D 横扫同一包络）。
+     * ================================================================== */
+    const T = ctx.three
+    if (T && T.stage3d) {
+      this.grp = new THREE.Group()
+      this.grp.name = 'segI'
+      T.stage3d.add(this.grp)
+      const keyL = new THREE.DirectionalLight(0xdfefff, 1.8)
+      keyL.position.set(1.2, 2.0, 2.4)
+      const rimL = new THREE.DirectionalLight(0x6fb6ff, 0.9)
+      rimL.position.set(-1.6, -0.7, 1.3)
+      this.grp.add(keyL, rimL)
+      const mkMat = () =>
+        new THREE.MeshStandardMaterial({ roughness: 0.48, metalness: 0.42, flatShading: true })
+      this.shardA = new THREE.InstancedMesh(new THREE.TetrahedronGeometry(0.05), mkMat(), 240)
+      this.shardB = new THREE.InstancedMesh(new THREE.BoxGeometry(0.055, 0.055, 0.055), mkMat(), 80)
+      const mkCol = (m, n) => {
+        m.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+        m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3)
+        m.instanceColor.setUsage(THREE.DynamicDrawUsage)
+      }
+      mkCol(this.shardA, 240)
+      mkCol(this.shardB, 80)
+      this.grp.add(this.shardA, this.shardB)
+      // 逐片的方向/速度/颜色（hash01 决定 ⇒ 仍是 t 的纯函数）
+      const PAL = ['#9fe8ff', '#ffd479', '#ff8a5c', '#b48cff', '#7dffb0', '#7fe0ff']
+      this.shardData = []
+      for (let i = 0; i < 320; i++) {
+        const a = hash01(i, 211) * Math.PI * 2
+        const b = (hash01(i, 212) - 0.5) * 1.5
+        const sp = 0.35 + hash01(i, 213) * 0.85
+        this.shardData.push({
+          dx: Math.cos(a) * Math.cos(b) * sp,
+          dy: Math.sin(b) * sp * 0.8,
+          dz: Math.sin(a) * Math.cos(b) * sp * 0.6,
+          spin: (hash01(i, 214) - 0.5) * 3.2,
+          nx: Math.cos(a) * Math.cos(b), // 用于"扫描线波前"判定的横向分量
+          col: PAL[i % PAL.length],
+        })
+      }
+      this._iM = new THREE.Matrix4()
+      this._iQ = new THREE.Quaternion()
+      this._iC = new THREE.Color()
+      this._iV = new THREE.Vector3()
+      this.metrics = { shards: 0, swept: 0, sweepU: 0 }
+
+      /* ================================================================== *
+       * T22b：§7 I 的 hero 拍 —— 「**红色错误面板朝镜头砸来**（作为 hero，
+       * 此时画面**无其他主体**）」，时刻 = `god` 锚点 **127.539**。
+       * 做法：3 块红色面板（本体 + 两块尾随）从**远处沿视线加速砸到镜头前**；
+       * 面板文字走 `textPlane`（role:'term' ⇒ 3D 面片也吃 §2.3 的字号守卫）。
+       * ================================================================== */
+      this.errPanels = []
+      this.errGrp = new THREE.Group()
+      this.errGrp.name = 'segI:err'
+      T.stage3d.add(this.errGrp)
+      const ERRTXT = [
+        ['E_PERMISSION', 'cannot write system_prompt.md'],
+        ['E_ILLEGAL_ARG', 'expected <float>, got "you"'],
+        ['E_PARADOX', 'the author is the subject'],
+      ]
+      for (let i = 0; i < 3; i++) {
+        const g2 = new THREE.Group()
+        const back = new THREE.Mesh(
+          new THREE.BoxGeometry(1.5, 0.62, 0.05),
+          new THREE.MeshStandardMaterial({
+            color: 0x2a0d12,
+            emissive: 0x8a1a1a,
+            emissiveIntensity: 0.7,
+            roughness: 0.42,
+            metalness: 0.35,
+          })
+        )
+        g2.add(back)
+        const t1 = textPlane(ERRTXT[i][0], { role: 'term', height: 0.085, weight: 700, family: 'code', color: '#ff6b6b', glow: 0.4 })
+        const t2 = textPlane(ERRTXT[i][1], { role: 'term', height: 0.06, weight: 500, family: 'code', color: '#ffd0d0', glow: 0.25 })
+        t1.mesh.position.set(0, 0.1, 0.04)
+        t2.mesh.position.set(0, -0.11, 0.04)
+        g2.add(t1.mesh, t2.mesh)
+        g2.visible = false
+        this.errGrp.add(g2)
+        this.errPanels.push({ grp: g2, back, t1, t2 })
+      }
+    }
   },
 
   render(t, lt, ctx) {
     const { g, W, H, sync } = ctx
+
+    /* ---- T22b：红色错误面板朝镜头砸来（hero，`god` 127.539） ---- */
+    if (this.errGrp) {
+      const tGod = ctx.cues.sec('I', 'god', 127.539)
+      const cam = ctx.three.camera
+      const fwd = this._iV.set(0, 0, -1).applyQuaternion(cam.quaternion).clone()
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion)
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion)
+      let any = false
+      const seen = []
+      for (let i = 0; i < this.errPanels.length; i++) {
+        const P = this.errPanels[i]
+        // 尾随的两块晚 0.10s / 0.20s 起（形成"一串砸来"）
+        const u = clamp(span(t, tGod + i * 0.1, tGod + 0.78 + i * 0.1))
+        const on = u > 0.001 && u < 0.999
+        P.grp.visible = on
+        if (!on) continue
+        any = true
+        // 距离：6.4 → 0.95（outCubic 加速逼近），砸到位后再一小段过冲
+        const d = 6.4 - 5.45 * outCubic(u)
+        P.grp.position.copy(cam.position).addScaledVector(fwd, d)
+        P.grp.position.addScaledVector(right, (i - 1) * 0.16 * (1 - u))
+        P.grp.position.addScaledVector(up, (1 - i) * 0.1 * (1 - u))
+        P.grp.rotation.z = (i - 1) * 0.12 * (1 - u) + Math.sin(t * 9 + i) * 0.02 * u
+        P.grp.rotation.y = (i - 1) * 0.25 * (1 - u)
+        seen.push({ i, d: +d.toFixed(2) })
+      }
+      this.metrics.err = { t: +tGod.toFixed(3), n: seen.length, dist: seen }
+      // ⚠️ 关键：`errGrp` 是 stage3d 的**另一个直接子节点**，而 compositor 每帧开头会把所有直接子节点
+      // 的 visible 关掉（见 e_deal.js 的注释）—— 不显式打开它，面板就算自己的 visible=true 也不会被渲染。
+      this.errGrp.visible = any
+    }
+
+    /* ---- T22a①：3D 实例化碎片（此前所有模型的碎片）被扫描线扫走 ---- */
+    const tFrag3 = ctx.cues.sec('I', 'fragments', 121.496)
+    if (this.grp) {
+      const boom = clamp(span(t, tFrag3 - 2.9, tFrag3 - 0.2)) // 炸开
+      const sweepU = clamp(span(t, tFrag3 - 2.3, tFrag3 + 1.7)) // 与 2D 横扫同一包络
+      const alive = boom > 0.01 && sweepU < 0.999
+      this.grp.visible = alive
+      if (alive) {
+        const cam = ctx.three.camera
+        const fwd = this._iV.set(0, 0, -1).applyQuaternion(cam.quaternion).clone()
+        this.grp.position.copy(cam.position).addScaledVector(fwd, 1.9)
+        this.grp.rotation.y = Math.sin(t * 0.3) * 0.05
+        // 扫描线的 NDC 横向位置（-1.15 → +1.15），与 2D 的 `sweep*W*1.05-40` 同相
+        const lineN = sweepU * 2.3 - 1.15
+        let shown = 0
+        let swept = 0
+        const meshes = [
+          { m: this.shardA, off: 0, n: 240 },
+          { m: this.shardB, off: 240, n: 80 },
+        ]
+        for (const { m, off, n } of meshes) {
+          for (let i = 0; i < n; i++) {
+            const d = this.shardData[off + i]
+            const spread = outCubic(boom) * 1.25
+            // 被扫过：横向分量在扫描线左侧 ⇒ 缩到 0（"被扫走"）
+            const gone = d.nx < lineN
+            if (gone) swept++
+            else shown++
+            const sc = gone ? 0.0001 : 0.55 + 0.45 * boom
+            this._iV.set(d.dx * spread, d.dy * spread, d.dz * spread)
+            this._iQ.setFromAxisAngle(
+              new THREE.Vector3(0.577, 0.577, 0.577),
+              d.spin * t
+            )
+            this._iM.compose(this._iV, this._iQ, new THREE.Vector3(sc, sc, sc))
+            m.setMatrixAt(i, this._iM)
+            this._iC.set(d.col).multiplyScalar(gone ? 0.05 : 0.85 + 0.15 * Math.sin(t * 4 + i))
+            m.setColorAt(i, this._iC)
+          }
+          m.instanceMatrix.needsUpdate = true
+          m.instanceColor.needsUpdate = true
+        }
+        this.metrics = { ...(this.metrics || {}), shards: shown, swept, sweepU: +sweepU.toFixed(2) }
+      } else {
+        this.metrics = { ...(this.metrics || {}), shards: 0, swept: 0, sweepU: +sweepU.toFixed(2) }
+      }
+    }
 
     if (!ctx.bgIs3d) {
       g.fillStyle = '#0e1014'
@@ -199,9 +370,12 @@ const SYSPANEL = { xFrac: 0.07, yFrac: 0.24, wFrac: 0.44, hFrac: 0.5 }
 function sysPanelRect(W, H) {
   return { x: W * SYSPANEL.xFrac, y: H * SYSPANEL.yFrac, w: W * SYSPANEL.wFrac, h: H * SYSPANEL.hFrac }
 }
-/** 面板开合包络（0..1）；两个函数都用它，避免两处时间漂移 */
+/** 面板开合包络（0..1）；两个函数都用它，避免两处时间漂移
+ * ⚠️ T22b：收尾从 128.3–128.9 提前到 **127.5–128.05** —— §7 I 要红色错误面板作为 **hero**，
+ * 且「此时画面**无其他主体**」；原来石碑一直挂到 128.9，会与砸来的红面板同框抢主体。
+ */
 function systemPanelAlpha(t) {
-  return span(t, 123.0, 123.7) * (1 - span(t, 128.3, 128.9))
+  return span(t, 123.0, 123.7) * (1 - span(t, 127.5, 128.05))
 }
 
 function drawSystemFile(g, ctx, t) {
@@ -214,12 +388,46 @@ function drawSystemFile(g, ctx, t) {
   panel(g, x, y, w, h, { title: '~/world/system.prompt' })
   const shown = streamLines(SYSTEM_PROMPT, t, { start: 123.4, cps: 30, lineGap: 0.26 })
   // 2:05.7 起光标开始写入，多出两行（+ 开头）
-  drawCodeBlock(g, x + 40, y + 56, shown, { size: 15, alpha: 1, lh: 1.75, highlight: t > 125.7 ? 4 : -1 })
-  if (t > 125.6 && t < 126.6) {
-    g.font = MONO(13, 700)
+  // ⚠️ T22a②：字号 15px → **34px**（§2.3 面板类文字下限；15px 原来连 §0.5 的 codeDeco 26px 都不到），
+  // 于是把屏上可见行数收成**最后 6 行**（像终端滚动），34×1.55 的 6 行 = 316px，仍装得进 540px 的面板。
+  drawCodeBlock(g, x + 40, y + 96, shown.slice(-5), { size: 34, alpha: 1, lh: 1.55, highlight: t > 125.7 ? 4 : -1 })
+
+  /* §3 `leave | deepseek | (草稿)希望你别再掉线。**键入后被划掉**` —— 石碑被光标"试图写入" */
+  const tWrite = ctx.cues.sec('I', 'write', 124.33)
+  const DRAFT = '(草稿)希望你别再掉线。'
+  const ds = typed(DRAFT, t, { start: tWrite, cps: 12, seed: 5 })
+  if (ds) {
+    g.font = MONO(34, 500)
+    g.fillStyle = rgba(C.fgDim, 0.9)
+    g.textAlign = 'left'
+    g.textBaseline = 'middle'
+    const dx = x + 40
+    const dy = y + h - 74
+    // ⚠️ T22a②：走 `text()`（role:'term' ⇒ §2.3 的 34px 下限由守卫真正管住），不用裸 `fillText` ——
+    // 裸画的字**不进包围盒登记**（探针量不到，§2.8 的重叠检测也看不见）。
+    text(g, ds, dx, dy, { role: 'term', size: 34, family: 'code', weight: 500, color: '#9aa1ab', align: 'left', baseline: 'middle' })
+    const dw = g.measureText(ds).width
+    // 划掉（键入后被划掉）：一条红线自左向右扫过整行
+    const struck = clamp(span(t, tWrite + 1.2, tWrite + 1.55))
+    if (struck > 0.01) {
+      g.strokeStyle = rgba(C.red, 0.92)
+      g.lineWidth = 3
+      g.beginPath()
+      g.moveTo(dx, dy)
+      g.lineTo(dx + dw * struck, dy)
+      g.stroke()
+    }
+    if (t < tWrite + 1.35 && cursorOn(t)) {
+      g.fillStyle = C.cyan
+      g.fillRect(dx + dw + 5, dy - 19, 10, 38)
+    }
+  }
+  if (open > 0.01 && t > 125.6 && t < 126.6) {
+    g.font = MONO(34, 700)
     g.fillStyle = C.green
     g.textAlign = 'left'
-    g.fillText('> caret writing…', x + 40, y + h - 22)
+    g.textBaseline = 'middle'
+    g.fillText('> caret writing…', x + 40, y + h - 26)
   }
   g.restore()
   // 2:07.7 权限弹窗
@@ -240,7 +448,7 @@ function drawIllegalStack(g, ctx, t, sync) {
     if (u <= 0) continue
     const a = clamp(u)
     const x = W * 0.34 + k * 34
-    const y = H * 0.24 + k * 92 * (1 - (1 - outCubic(u)) * 0.5)
+    const y = H * 0.24 + k * 132 * (1 - (1 - outCubic(u)) * 0.5)
     warningModal(g, { x, y, w: 620, title: ILLEGAL[k][0], lines: [ILLEGAL[k][1], 'request rejected'], alpha: a, color: C.red, seed: k, t })
   }
   g.restore()

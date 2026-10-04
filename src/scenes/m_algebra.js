@@ -116,16 +116,22 @@ function drawLoveCode(g, ctx, t) {
   const { W, H } = ctx
   const a = span(t, 181.4, 181.9) * (1 - span(t, 188.1, 188.45))
   if (a <= 0.01) return
-  const shown = streamLines(LOVE_CODE.slice(0, 5), t, { start: 181.6, cps: 30, lineGap: 0.2 })
+  // T07b / FIX_V4 §2.3：段 M 的对话/代码小窗文字必须 **≥34px**（原来 14px）。
+  // 「放不下时缩短内容,不缩字号」→ 把可见行数从 5 减到 **3**，字号抬到 34、行高 1.5。
+  // 版式：3×34×1.5 = 153，加标题栏 28 与上下边距 → 面板 h ≈ 235，仍在左栏内、不进歌词区。
+  const shown = streamLines(LOVE_CODE.slice(0, 3), t, { start: 181.6, cps: 30, lineGap: 0.2 })
   if (!shown.length) return
   const x = W * 0.05
   const w = W * 0.40
-  const y = H * 0.10
-  const h = shown.length * 26 + 58
+  // ⚠️ 字号抬到 34 后代码窗变高（3×51+58 = 211），原来的 y=0.10H 会让正文底部
+  // （≈265）压到 56px 方程的顶部（280）—— 实测 183.4–185.9 每帧 1 处重叠。
+  // 按「放不下时缩短内容」的精神把窗口整体上移到 0.04H：窗口 43–254、正文底部 ≈265 < 280 ✓
+  const y = H * 0.04
+  const h = shown.length * 34 * 1.5 + 58
   g.save()
   g.globalAlpha = a
   panel(g, x, y, w, h, { title: '~/world/love.py' })
-  drawCodeBlock(g, x + 24, y + 50, shown, { size: 14, alpha: 1, lh: 1.6, highlight: -1 })
+  drawCodeBlock(g, x + 24, y + 56, shown, { size: 34, alpha: 1, lh: 1.5, highlight: -1 })
   g.restore()
 }
 
@@ -165,60 +171,3 @@ function drawExtrudedEquation(g, ctx, t, a) {
   g.restore()
 }
 
-/* ---------------- 低多边形心脏（真实隐式方程采样 + 面片） ---------------- */
-function drawHeartFacets(g, ctx, t, a, beat) {
-  const { W, H } = ctx
-  const cx = W * 0.72
-  const cy = H * 0.48
-  const R = H * 0.30 * outElastic(clamp(a)) * beat
-  g.save()
-  g.globalAlpha = clamp(a)
-  // 在隐式方程表面采样点（用 heartField 的真实符号判断）
-  const N = 260
-  const pts = []
-  for (let i = 0; i < N; i++) {
-    const th = (i / N) * TAU
-    const x = 16 * Math.sin(th) ** 3
-    const y = 13 * Math.cos(th) - 5 * Math.cos(2 * th) - 2 * Math.cos(3 * th) - Math.cos(4 * th)
-    pts.push([x * 0.052, y * 0.052, Math.cos(th * 2) * 0.16])
-  }
-  // 面片：以中心为顶点做扇形三角，形成「低多边形面片拼成的心脏」
-  const SEG = 34 // 分段数 → 34 个面片
-  const center = [0, 0.06, 0.2]
-  const X = (p) => cx + p[0] * R * 2.6
-  const Y = (p) => cy - (p[1] + 0.05) * R * 2.6 - p[2] * R * 0.9
-  for (let k = 0; k < SEG; k++) {
-    const i0 = Math.floor((k / SEG) * pts.length)
-    const i1 = Math.floor(((k + 1) / SEG) * pts.length) % pts.length
-    const p0 = pts[i0]
-    const p1 = pts[i1]
-    // 每个面片给一点 z 抖动 → 折面感
-    const jz = (hash01(k, 161) - 0.5) * 0.05
-    const lum = clamp(0.35 + 0.5 * (jz / 0.05 + 1) * 0.5 + 0.2 * Math.abs(p0[0] * 6))
-    g.beginPath()
-    g.moveTo(X(center), Y(center))
-    g.lineTo(X(p0), Y(p0))
-    g.lineTo(X(p1), Y(p1))
-    g.closePath()
-    g.fillStyle = rgba(mixHex('#5a1020', '#ff5f7a', lum), 0.62)
-    g.fill()
-    g.strokeStyle = rgba('#ffc0cf', 0.16)
-    g.lineWidth = 1
-    g.stroke()
-  }
-  // 心跳环（真实节拍）
-  const pulse = ctx.sync.pulse(t, 240)
-  if (pulse > 0.1) {
-    g.strokeStyle = rgba('#ff8fa3', pulse * 0.5)
-    g.lineWidth = 2
-    g.beginPath()
-    g.arc(cx, cy, R * (1.5 + 0.5 * (1 - pulse)), 0, TAU)
-    g.stroke()
-  }
-  g.font = MONO(15, 700)
-  g.fillStyle = rgba('#ffb0c0', 0.9)
-  g.textAlign = 'center'
-  g.textBaseline = 'alphabetic'
-  g.fillText(`love() → 1 item   bpm ${ctx.sync.tempoAt(t).toFixed(1)}`, cx, cy + R * 2.0)
-  g.restore()
-}

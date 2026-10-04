@@ -16,10 +16,9 @@
 // 依赖：Node 22+ 内置 WebSocket（本项目 Node 24）。只用内置模块。
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { killTree } from './kill_tree.mjs'
 
 const CHROME_CANDIDATES = [
@@ -84,14 +83,22 @@ class CDP {
   send(method, params = {}) {
     const id = ++this.id
     return new Promise((res, reject) => {
-      this.pending.set(id, { resolve: res, reject })
-      this.ws.send(JSON.stringify({ id, method, params }))
-      setTimeout(() => {
+      // ⚠️ T24：这个定时器必须**在 settle 时清掉**。原来不清 → 每个 send() 都留一个
+      // 未清的 timer，Node 的事件循环因此一直活着（我把超时从 120s 放宽到 30min 之后，
+      // 进程会在打印完结果后再挂 30 分钟，doctor 的 b2/d 直接报 `spawnSync … ETIMEDOUT`）。
+      const t = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id)
           reject(new Error(`CDP 超时：${method}`))
         }
-      }, 120000)
+        // T19c：全片扫描（~424 帧 × SwiftShader）远超过原来的 120s，单个 Runtime.evaluate
+        // 会被这里误杀。放宽到 30 分钟；短探针不受影响（它们本来就秒回）。
+      }, 1800000)
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(t); res(v) },
+        reject: (e) => { clearTimeout(t); reject(e) },
+      })
+      this.ws.send(JSON.stringify({ id, method, params }))
     })
   }
   async evaluate(expr, { awaitPromise = false } = {}) {
@@ -120,7 +127,12 @@ async function main() {
     process.exit(2)
   }
   const port = args.port || 9300 + Math.floor(Math.random() * 500)
-  const profile = join(tmpdir(), 'dshpv-shoot-' + randomBytes(4).toString('hex'))
+  // ✅ T24：「探针脚本清理与复用」。原来每次运行都新建一个**随机** profile、结束时 `rmSync` 删掉 ——
+  // 实测这条链有两个问题：① 被中断（例如全片扫描时被 kill）就留下一个 30–50MB 的
+  // `%TEMP%\dshpv-shoot-*`，本会话实测堆到 **102 个 / 3.43 GB**；② `rmSync` 一个刚被 Chrome
+  // 写过的目录在本机上偶尔会**卡住几分钟**（doctor 的 b2/d 因此报 `spawnSync … ETIMEDOUT`）。
+  // 现在**复用同一个 user-data-dir**、并且**不在本进程里删它** —— 目录长期只有一个。
+  const profile = join(tmpdir(), 'dshpv-chrome')
   mkdirSync(profile, { recursive: true })
 
   const child = spawn(
@@ -143,12 +155,8 @@ async function main() {
   )
 
   const cleanup = () => {
+    // T24：只杀进程，**不删** 复用的 profile（见上面的说明）
     killTree(child)
-    try {
-      rmSync(profile, { recursive: true, force: true })
-    } catch (e) {
-      /* ignore */
-    }
   }
 
   try {
@@ -249,6 +257,8 @@ async function main() {
     for (const l of cdp.logs.filter((x) => /error|EXCEPTION|WARN/i.test(x)).slice(0, 10)) console.log('   log:', l)
     ws.close()
     cleanup()
+    // T24：显式退出，别让残留的 timer / socket 把进程吊住（doctor 的 spawnSync 会因此超时）
+    process.exit(0)
   } catch (e) {
     cleanup()
     console.error('FAILED:', e.message)

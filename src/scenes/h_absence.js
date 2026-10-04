@@ -5,7 +5,8 @@
 //   ④她表情转 sad 并垂下视线 ⑤整扇窗口变灰，只剩错误码
 // 1:56.0 孤立：全部熄灭，只剩一枚像素光标与处于暗圈里的 sad 立绘。
 
-import { C, rgba } from '../core/palette.js'
+import * as THREE from 'three'
+import { C, rgba, mixHex } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
 import { MONO, panel, bubble, reconnectBanner, roundRect, wrapText } from '../ui/dsh.js'
@@ -73,10 +74,190 @@ export default {
     this.paneRec = null
     if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.monitor.object)
     if (ctx.stageRoles) this.paneRec = this.monitor.registerWith(ctx.stageRoles)
+
+    /* ---- T21b：`completion` 的**终端屏幽灵补全**（§7 H「completion 用终端屏的幽灵补全」+ §3）----
+     * 右带一块终端屏：`我今天…`（you，110.202 = completion 锚点）→ +0.4s 出现灰色幽灵行
+     * `…想见你。⇥ Tab`（kind:'ghost' ⇒ 灰 #6f7680）→ 按 Tab 后**变白**（kind 切成 'deepseek' ⇒ #e8eaee）。
+     * 旧实现是一行**英文**裸文字画在 2D 画布上（26px、且从 107.6 就开始 —— 比 `completion` 锚点早 2.6s），
+     * 既不是 §3 的台词、也没有终端屏，本项整块替换。
+     */
+    this.cPane = createTermPane({ session: '#001', side: 'R' })
+    this.cMon = createMonitor({
+      pane: this.cPane,
+      width: 0.9,
+      shell: 'flat',
+      glow: 0.38,
+      tag: 'H:completion',
+      seg: 'H',
+      anchor: 'completion',
+    })
+    this.cMon.object.visible = false
+    this.cRec = null
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.cMon.object)
+    if (ctx.stageRoles) this.cRec = this.cMon.registerWith(ctx.stageRoles)
+    this.lastCKey = ''
+
+    /* ================================================================== *
+     * T21a：§7 H 的两件 3D 主体
+     *   ① 「**3D 键盘**（键帽随起音点按下，**代表"你"**）」—— 键帽按下 = §3 的 `key ▸ ▸ ▸ ▸`；
+     *   ② 「**真实频谱彩带**」—— 彩带的振幅直接来自 `sync.spectrumAt()` 的 64 段真实频谱。
+     * 段 H 此前**完全没有 3D**（整段 2D），这两件是本项新增。
+     * ================================================================== */
+    const T = ctx.three
+    if (T && T.stage3d) {
+      this.grp = new THREE.Group()
+      this.grp.name = 'segH'
+      T.stage3d.add(this.grp)
+      const keyL = new THREE.DirectionalLight(0xdfefff, 1.9)
+      keyL.position.set(1.3, 2.2, 2.4)
+      const rimL = new THREE.DirectionalLight(0x6fb6ff, 1.0)
+      rimL.position.set(-1.7, -0.7, 1.3)
+      this.grp.add(keyL, rimL)
+
+      // ---- 3D 键盘：14×6 = 84 个键帽（InstancedMesh，逐实例颜色） ----
+      this.kbCols = 14
+      this.kbRows = 6
+      const N = this.kbCols * this.kbRows
+      this.keyMat = new THREE.MeshStandardMaterial({
+        color: 0x28324a,
+        roughness: 0.5,
+        metalness: 0.35,
+        emissive: 0x0b1a2a,
+        emissiveIntensity: 1,
+      })
+      this.kb = new THREE.InstancedMesh(new THREE.BoxGeometry(0.052, 0.022, 0.058), this.keyMat, N)
+      this.kb.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+      this.kb.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3)
+      this.kb.instanceColor.setUsage(THREE.DynamicDrawUsage)
+      const M = new THREE.Matrix4()
+      const c0 = new THREE.Color()
+      for (let i = 0; i < N; i++) {
+        const cx = i % this.kbCols
+        const cz = Math.floor(i / this.kbCols)
+        M.makeTranslation((cx - (this.kbCols - 1) / 2) * 0.062, 0, (cz - (this.kbRows - 1) / 2) * 0.066)
+        this.kb.setMatrixAt(i, M)
+        c0.setHex(0x28324a)
+        this.kb.setColorAt(i, c0)
+      }
+      this.kb.instanceMatrix.needsUpdate = true
+      this.kb.instanceColor.needsUpdate = true
+      this.kbGrp = new THREE.Group()
+      this.kbGrp.rotation.x = -0.62
+      this.kbGrp.add(this.kb)
+      this.grp.add(this.kbGrp)
+      this._kbM = new THREE.Matrix4()
+      this._kbC = new THREE.Color()
+      this._kbPress = new Float32Array(N)
+      this._kbOn = new Float32Array(N)
+
+      // ---- 频谱彩带：128 段的平面，顶点按真实频谱位移 + 顶点色 ----
+      this.spec = new Float32Array(64)
+      this.ribGeo = new THREE.PlaneGeometry(2.7, 0.5, 128, 1)
+      const rn = this.ribGeo.attributes.position.count
+      this.ribGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(rn * 3), 3))
+      this.ribMat = new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+      this.ribbon = new THREE.Mesh(this.ribGeo, this.ribMat)
+      this.grp.add(this.ribbon)
+      this.metrics = { keyPresses: 0, specPeak: 0, kbA: 0 }
+    }
   },
 
   render(t, lt, ctx) {
     const { g, W, H, sync } = ctx
+
+    /* ---- T21a：3D 键盘（键帽随起音点按下，代表"你"）+ 真实频谱彩带 ---- */
+    // 在场窗口：`vibrations`(106.256) 前 0.6s 起 → isolation 的黑场（116.0）前收。
+    const kbA = clamp(span(t, 105.6, 106.5)) * (1 - clamp(span(t, 115.7, 116.5)))
+    if (this.grp) {
+      this.grp.visible = kbA > 0.01
+      if (this.grp.visible) {
+        const cam = ctx.three.camera
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion)
+        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion)
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion)
+        // 键盘：镜头前偏下、像放在你面前的桌面
+        this.kbGrp.position.copy(cam.position).addScaledVector(fwd, 1.35).addScaledVector(up, -0.62)
+        this.kbGrp.rotation.y = Math.sin(t * 0.17) * 0.04
+        // T23：键盘/彩带原来铺满画面（fov 收窄时更是压到四角，v) 报 0.13–0.19）→ 缩到 0.78 并收进画面中部
+        this.kbGrp.scale.setScalar(0.78 * (1 - 0.32 * clamp(span(t, 113.5, 115.8))))
+        this.keyMat.opacity = kbA
+        this.keyMat.transparent = true
+        // 彩带：键盘上方，随频谱起伏
+        this.ribbon.position.copy(cam.position).addScaledVector(fwd, 1.5).addScaledVector(up, 0.34)
+        this.ribbon.rotation.z = Math.sin(t * 0.23) * 0.03
+        this.ribbon.scale.setScalar(0.78 * (1 - 0.32 * clamp(span(t, 113.5, 115.8))))
+        this.ribMat.opacity = 0.72 * kbA
+
+        // ① 起音点 → 键帽按下：每个起音点按一个确定性的键（`round(o*8) % N`），指数回弹
+        // ⚠️ 注意：`sync.onsetsIn(a,b)` 返回的是 **`{t, s}` 对象数组**（时间 + 强度），不是数字数组
+        // —— 第一版直接把它当数字用，`t - o` 得到 NaN ⇒ 键帽一次都没按下（实测 keyPresses 恒 0）。
+        const N = this.kbCols * this.kbRows
+        const ons = sync.onsetsIn(Math.max(0, t - 3.2), t)
+        this._kbPress.fill(0)
+        this._kbOn.fill(0)
+        for (const o of ons) {
+          const ot = o && typeof o === 'object' ? o.t : o
+          const os = o && typeof o === 'object' && o.s != null ? o.s : 0.5
+          if (typeof ot !== 'number') continue
+          const k = ((Math.round(ot * 8) % N) + N) % N
+          const pr = Math.exp(-(t - ot) * 5.5) * (0.45 + 0.55 * clamp(os * 2))
+          if (pr > 0.02 && pr > this._kbPress[k]) {
+            this._kbPress[k] = pr
+            this._kbOn[k] = 1
+          }
+        }
+        let presses = 0
+        for (let i = 0; i < N; i++) {
+          const pr = this._kbPress[i]
+          if (pr > 0.02) presses++
+          const cx = i % this.kbCols
+          const cz = Math.floor(i / this.kbCols)
+          this._kbM.makeTranslation(
+            (cx - (this.kbCols - 1) / 2) * 0.062,
+            -0.016 * pr,
+            (cz - (this.kbRows - 1) / 2) * 0.066
+          )
+          this.kb.setMatrixAt(i, this._kbM)
+          // 按下时键帽变亮（青 → 白）
+          this._kbC.setHex(0x28324a).lerp(new THREE.Color(0x9fe8ff), pr)
+          this.kb.setColorAt(i, this._kbC)
+        }
+        this.kb.instanceMatrix.needsUpdate = true
+        this.kb.instanceColor.needsUpdate = true
+        // 整块键盘随起音点做一次很轻的自发光脉冲（键帽稀疏时也读得出"你正在打）
+        this.keyMat.emissiveIntensity = 0.9 + 1.4 * clamp(sync.pulse(t, 130)) * kbA
+
+        // ② 真实频谱彩带：64 段频谱 → 128 个顶点的位移与顶点色
+        sync.spectrumAt(t, this.spec)
+        const pos = this.ribGeo.attributes.position
+        const col = this.ribGeo.attributes.color
+        const rn = pos.count
+        let peak = 0
+        for (let i = 0; i < rn; i++) {
+          const u = i / (rn - 1)
+          const s = this.spec[Math.min(63, Math.floor(u * 64))]
+          peak = Math.max(peak, s)
+          const isTop = i >= rn / 2
+          pos.setY(i, (isTop ? 1 : -1) * (0.02 + 0.5 * 0.5 * s))
+          // 频谱越高越偏暖（青 → 琥珀），彩带因此有"真实"的颜色起伏
+          const c = mixHex('#3fd0ff', '#ffb454', clamp(s * 1.6))
+          col.setXYZ(i, parseInt(c.slice(1, 3), 16) / 255, parseInt(c.slice(3, 5), 16) / 255, parseInt(c.slice(5, 7), 16) / 255)
+        }
+        pos.needsUpdate = true
+        col.needsUpdate = true
+        this.metrics = { keyPresses: presses, specPeak: +peak.toFixed(3), kbA: +kbA.toFixed(2) }
+      } else {
+        this.metrics = { keyPresses: 0, specPeak: 0, kbA: 0 }
+      }
+    }
+
     const dark = span(t, 116.0, 116.9)
     // ⚠️ 这块"全黑"以前是 `globalAlpha = dark`（dark 到 1 = 不透明），把 3D 层整个盖住 ——
     // 于是 §7 段 H 要求的「isolation **缩成远处一点微光**」根本不可能出现，
@@ -84,7 +265,45 @@ export default {
     // 因为这一帧只有一块纯黑 + 一枚 9×20 的光标 + 一行 13px 小字。
     // 现在留 32% 的透射：远处那块终端屏（§2.3 要求段 H 有 Monitor）成为画面里唯一的微光，
     // 既落实了 DIRECTOR 的"微光"，也把硬边补回来。
-    const darkA = dark * 0.68
+    // ⚠️ T21b 修：`span(116.0,116.9)` 是**单向斜坡**（116.9 之后恒为 1），于是那层黑纱在 116.9 之后
+    // **一直挂着 0.6** —— 比黑场本身还黑，既压住 §7 要的"远处一点微光"，也把 117/118s 的 mean
+    // 压到 0.067/0.071（§6 下限 0.10）。改成**一个真正的黑场拍子**：116.0–116.7 起、116.9–117.4 松开。
+    const darkA = Math.min(0.34, span(t, 116.0, 116.7)) * (1 - clamp(span(t, 116.9, 117.4)))
+
+    /* ---- T21b：`isolation`「缩成远处一点微光」+ **117–118s 的 0.5s mean ≥0.10**（T19f 转交的硬验收项）----
+     * 现状实测 117.0/118.0 只有 **0.067/0.071**（§6 下限 0.10）：画面只剩一块远处终端屏，
+     * 其余是近黑 —— 这是**场景本身没有光**，不是曝光能补的（再抬曝光 6× 会把黑底洗成灰雾）。
+     * 这里按 §7 的构图给它自己的光：**远处那块屏 + 一圈柔和的"微光"晕**（径向渐变，中心亮、边缘归零），
+     * 亮度由曝光与发光本身给，不动任何门槛。
+     */
+    const isoGlow = clamp(span(t, 116.35, 117.0)) * (1 - clamp(span(t, 118.0, 118.28)))
+    if (isoGlow > 0.01) {
+      // 以远处终端屏的投影位置为"微光"的圆心（拿不到就退回左带中心）
+      let gx = W * 0.16
+      let gy = H * 0.5
+      if (this.monitor && ctx.three && ctx.three.camera) {
+        const p = new THREE.Vector3()
+        this.monitor.object.getWorldPosition(p)
+        p.project(ctx.three.camera)
+        if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
+          gx = (p.x * 0.5 + 0.5) * W
+          gy = (-p.y * 0.5 + 0.5) * H
+        }
+      }
+      const R = H * 0.46
+      const rg = g.createRadialGradient(gx, gy, 0, gx, gy, R)
+      rg.addColorStop(0, rgba('#9fd8ff', 0.9 * isoGlow))
+      rg.addColorStop(0.35, rgba('#4f86c8', 0.5 * isoGlow))
+      rg.addColorStop(1, 'rgba(0,0,0,0)')
+      g.save()
+      g.globalCompositeOperation = 'lighter'
+      g.fillStyle = rg
+      g.fillRect(0, 0, W, H)
+      g.restore()
+      this.metrics.isoGlow = +isoGlow.toFixed(2)
+    } else {
+      this.metrics.isoGlow = 0
+    }
 
     // 背景
     if (!ctx.bgIs3d) {
@@ -103,39 +322,39 @@ export default {
       drawTypingWave(g, ctx, t, waveA, spec)
     }
 
-    // ---- 1:48.2 灰色幽灵补全 + Tab 接受 ----
-    if (t > 107.6 && t < 112.4) {
-      const acc = span(t, 108.2, 108.45)
-      const a = span(t, 107.6, 108.0) * (1 - span(t, 110.4, 111.2))
-      if (a > 0.01) {
-        g.save()
-        g.globalAlpha = a * (1 - acc * 0.75)
-        g.font = MONO(26, 500)
-        g.fillStyle = acc > 0.5 ? rgba(C.fg, 0.85) : rgba(C.fgDim, 0.55)
-        g.textAlign = 'left'
-        g.textBaseline = 'middle'
-        const bx = W * 0.22
-        const by = H * 0.38
-        g.fillText(GHOST, bx, by)
-        // 幽灵光标
-        if (acc < 0.5) g.fillStyle = rgba(C.fgDim, 0.7)
-        else g.fillStyle = C.cyan
-        g.fillRect(bx + g.measureText(GHOST).width + 6, by - 16, 10, 32)
-        // Tab 提示
-        if (t > 107.9 && t < 108.9) {
-          g.font = MONO(15, 700)
-          g.fillStyle = C.green
-          g.fillText('[ tab ] accept completion', bx, by + 44)
-        }
-        g.restore()
+    // ---- T21b：`completion` 的终端屏幽灵补全（§7 H + §3；旧的那行英文 2D 裸文字已删除） ----
+    const tComp = ctx.cues.sec('H', 'completion', 110.202)
+    if (this.cPane) {
+      const cIn = clamp(span(t, tComp - 0.5, tComp + 0.1))
+      const cOut = 1 - clamp(span(t, tComp + 1.25, tComp + 1.62))
+      const cA = cIn * cOut
+      const accepted = t >= tComp + 1.0 // §3「按 Tab 后变白」
+      const rows = [{ kind: 'you', text: '我今天…' }]
+      if (t >= tComp + 0.4) rows.push({ kind: accepted ? 'deepseek' : 'ghost', text: accepted ? '…想见你。' : '…想见你。⇥ Tab' })
+      const key = rows.map((r) => r.kind + r.text).join('|')
+      if (key !== this.lastCKey) {
+        this.lastCKey = key
+        this.cPane.setLines(rows.slice(0, 7), { session: '#001', subtitle: '' })
       }
+      const cam0 = ctx.three.camera
+      const d0 = 2.8
+      const halfH0 = d0 * Math.tan(((cam0.fov || 40) * Math.PI) / 180 / 2)
+      const halfW0 = halfH0 * (cam0.aspect || 16 / 9)
+      this.cMon.object.position.set(cam0.position.x + 0.86 * halfW0, cam0.position.y, cam0.position.z - d0)
+      this.cPane.tick(t, { appearAt: tComp - 0.5, parallax: { x: 0, y: 0 }, glitch: 0 })
+      this.cPane.flush()
+      this.cMon.object.visible = cA > 0.01
+      this.metrics.completion = { t: +tComp.toFixed(3), accepted, rows: rows.length, a: +cA.toFixed(2) }
     }
 
     // ---- 五次「离开」：重连横幅 + 逐次递进（时刻来自锚点表） ----
     const attempts = LEFT_KEYS.map((key, i) => ctx.cues.sec('H', key, LEFT_FALLBACK[i]))
     for (let k = 0; k < attempts.length; k++) {
       const t0 = attempts[k]
-      const a = span(t, t0, t0 + 0.15) * (1 - span(t, t0 + 0.95, t0 + 1.05))
+      // ⚠️ T21a 修：横幅原来活到 `t0+1.05`，而相邻两次 `left` 只隔 **0.894–0.953s**
+      // ⇒ 相邻两条的交叉淡入必然重叠（实测 114.7 的 "(timer still counting)" ∩ "her gaze drops." IoU 0.258）。
+      // 改成 `t0+0.84` 收干净（最短间隔 0.894 ⇒ 下一条起来时上一条已经没了）＝§5.1b 的"硬切"口径。
+      const a = span(t, t0, t0 + 0.15) * (1 - span(t, t0 + 0.7, t0 + 0.84))
       if (a <= 0.01) continue
       drawAttempt(g, ctx, t, k, a, t0)
     }
@@ -267,7 +486,11 @@ function drawTypingWave(g, ctx, t, a, spec) {
 function drawAttempt(g, ctx, t, k, a, t0) {
   const { W, H } = ctx
   const x = W * 0.52
-  const y = H * 0.16 + k * 0.0
+  // ⚠️ T21a 修：原来是 `H * 0.16 + k * 0.0` —— **那个 `* 0.0` 让五条横幅全部落在同一个 (x,y)**，
+  // 于是相邻两条在交叉淡入时文字盒完全重合（实测 t=112.8/112.9 的 IoU = **1.0**，
+  // 114.7 还连带把 "last active 66 minutes" 与 "her gaze drops." 压在一起 IoU 0.349）。
+  // §7 H 明写「五次 left 的重连横幅**各自不同**」，这里按 k 逐条下移 34px（配合每条的 mode 也不同）。
+  const y = H * 0.16 + k * 34
   g.save()
   g.globalAlpha = a
   // 重连横幅 1/5 … 5/5

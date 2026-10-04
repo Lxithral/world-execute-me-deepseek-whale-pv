@@ -214,7 +214,12 @@ export class Compositor {
     const drawThree = () => {
       if (layerMask_three === false) return
       gc.globalCompositeOperation = this.composite3d === 'lighter' ? 'lighter' : 'source-over'
-      gc.drawImage(this.threeCanvas, 0, 0)
+      // ⚠️ 必须**显式给出目标尺寸**。没有它时 `drawImage` 按位图的原始像素尺寸画：
+    // DPR=1 时位图正好是 1920×1080（看起来"全屏"），但 T01 的 DPR 自适应一旦把
+    // `setPixelRatio` 降到 0.6，位图变成 1152×648 —— 3D 层就只铺满**左上角 60%**，
+    // 右边和下面是黑的（用户截图里正是这个现象）。
+    // 给出 (W,H) 之后位图会被缩放铺满，代价只是低 DPR 下略软 —— 这才是自适应的本意。
+    gc.drawImage(this.threeCanvas, 0, 0, this.W, this.H)
       gc.globalCompositeOperation = 'source-over'
     }
     drawThree()

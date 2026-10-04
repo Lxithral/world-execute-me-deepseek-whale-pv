@@ -4,10 +4,9 @@
 // 不修改任何门槛：它只是把 window.__selftestState.lines 原样打印出来。
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { killTree } from './kill_tree.mjs'
 
 const CHROME = [
@@ -26,7 +25,8 @@ if (!CHROME) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const port = 9800 + Math.floor(Math.random() * 190)
-const profile = join(tmpdir(), 'dshpv-st-' + randomBytes(4).toString('hex'))
+// ✅ T24：复用同一个 user-data-dir，且不在本进程里删（见 tools/shoot.mjs 的说明）
+const profile = join(tmpdir(), 'dshpv-chrome')
 mkdirSync(profile, { recursive: true })
 const child = spawn(CHROME, [
   '--headless=new', '--disable-gpu', '--enable-unsafe-swiftshader', '--use-angle=swiftshader',
@@ -36,7 +36,6 @@ const child = spawn(CHROME, [
 
 const cleanup = () => {
   killTree(child)
-  try { rmSync(profile, { recursive: true, force: true }) } catch (e) {}
 }
 
 class CDP {

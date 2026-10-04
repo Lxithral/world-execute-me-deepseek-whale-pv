@@ -103,6 +103,9 @@ export default {
     /* ---- T06 / §1.10 乐句三：工具峡谷（两侧发光终端屏） ---- */
     this.canyon = buildCanyon()
     if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.canyon.object)
+    /* ---- T25：公式碎片的**粒子字形**装饰场（图形，不是文本） ---- */
+    this.fdust = buildFormulaDust()
+    if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.fdust.object)
   },
 
   render(t, lt, ctx) {
@@ -139,12 +142,23 @@ export default {
     // ---- 梯度下降小球沿螺旋坠入（表驱动） ----
     drawDescentBall(g, ctx, t, this.gd, depth)
 
-    // ---- 公式螺旋坠入并被潮汐拉长 ----
-    // 数字翻牌在场时把公式云上移+缩小+淡出，避免两者撞在同一块画面（见 drawTidalFormulas 的说明）。
-    // 窗口起点定在 158.5–158.95：让 suppress 在 159.0s 之前就到达 1（原先 158.7–159.1
-    // 到 159.0s 才 0.75，压制不够）。
-    const flipA = span(t, 158.5, 158.95) * (1 - span(t, 161.3, 161.75))
-    drawTidalFormulas(g, ctx, t, heat, flipA)
+    // ---- T25 / §1.10 hit4：公式风暴绕黑洞**圆周盘旋**并被**潮汐拉长** ----
+    // 只在 hit4 窗口里画**文本**公式（4 条、68px）；窗口两端各留 0.35s 斜坡。
+    // 其余时间段的"风暴"密度由 `this.fdust` 的**粒子字形**承担（那是图形、不是文本），
+    // 所以旧的"翻牌期压 stretch / 夹 y"那一整套补丁不再需要。
+    const E = this.execs
+    const hit4Win =
+      E[3] != null && E[4] != null
+        ? span(t, E[3] - 0.15, E[3] + 0.35) * (1 - span(t, E[4] - 0.30, E[4] + 0.40))
+        : 0
+    drawTidalFormulas(g, ctx, t, heat, 0, hit4Win)
+    // 粒子字形场：乐句一在场期间给背景密度（同样随 hit4 淡出）
+    if (this.fdust) {
+      const cam = ctx.three.camera
+      const here1 = t >= 147.9 && t < (E[4] != null ? E[4] + 0.4 : 153)
+      this.fdust.object.position.set(cam.position.x + 0.18, cam.position.y + 0.02, cam.position.z - 3.1)
+      this.fdust.update(t, { alpha: here1 ? clamp(0.25 + 0.75 * hit4Win) : 0 })
+    }
 
     // ---- 12 张工具卡片飞入（左带竖排，§7 段 K：工具调用只在侧带）----
     drawToolCards(g, ctx, t, this.execs, heat)
@@ -292,9 +306,10 @@ export default {
         this.canyon.object.position.z -= 0.35 * clamp((t - p9t) / Math.max(1e-3, 162 - p9t))
         this.canyon.update(t, {
           alpha: (1 - 0.86 * yieldCards) * (1 - 0.9 * nova),
-          scroll: 1 - 0.92 * freezeGlitch,
           dolly,
-          freeze: freezeGlitch,
+          t0: p9t,
+          f0: p10,
+          f1: p11,
         })
         this.metrics.phrase = 3
         this.metrics.canyon = {
@@ -832,20 +847,40 @@ function buildCanyon() {
       frame.position.copy(m.position)
       frame.rotation.copy(m.rotation)
       grp.add(frame)
-      panels.push({ m, mat, map, frame, i, side: s })
+      panels.push({ m, mat, map, frame, i, side: s, offset0: (i * 0.37) % 1 })
     }
   }
   return {
     object: grp,
     panels,
     update(t, o = {}) {
-      const { alpha = 1, scroll = 1, dolly = 0, freeze = 0 } = o
+      const { alpha = 1, dolly = 0, t0 = 147.9, f0 = 157.9, f1 = 158.4 } = o
       grp.visible = alpha > 0.01
       if (!grp.visible) return
+      /* ⚠️ T23a 修（真 bug，违反 §0「渲染是 t 的纯函数」）：
+       * 原来写的是 `p.map.offset.y = (p.map.offset.y - (0.55*scroll*(1-freeze))/60) % 1` ——
+       * **每次调用都拿当前值再减一格**，于是滚动量按"渲染次数"累加而与 t 无关：
+       * 同一个 t 连渲 4 次得到 4 个不同画面（实测 t=157.0 两两相差 **38–40 万像素**），
+       * 全量 `?selftest` 的 a) 也因此在 t=156.43 报"乱序差 1"。
+       * 现在改成**闭式相位**：把滚动速率 `rate(τ) = 0.55·(1-0.92·f(τ))·(1-f(τ))`
+       * （`f = seg(f0,f1)` 是 hit10 的线性冻结斜坡）在 [t0, t] 上**解析积分**
+       * （∫(1-1.92w+0.92w²)dw = w - 0.96w² + 0.92/3·w³），再用 `offset0` 推出偏移 ——
+       * 于是同一 t 无论渲染多少次、以什么顺序渲染，贴图偏移都完全一致（且视觉上的"冻结"保留）。
+       */
+      const D = Math.max(1e-3, f1 - f0)
+      let phase
+      if (t <= f0) phase = t - t0
+      else if (t < f1) {
+        const w = clamp((t - f0) / D)
+        phase = f0 - t0 + D * (w - 0.96 * w * w + (0.92 / 3) * w * w * w)
+      } else {
+        phase = f0 - t0 + D * (1 - 0.96 + 0.92 / 3) + (t - f1)
+      }
+      const off = 0.55 * phase
       for (const p of panels) {
-        // 滚动：冻结（hit10）时把速度压到 0，并叠一点"错位残留"
-        p.map.offset.y = (p.map.offset.y - (0.55 * scroll * (1 - freeze)) / 60) % 1
-        p.mat.opacity = alpha * (0.55 + 0.4 * (1 - freeze))
+        p.map.offset.y = (p.offset0 - off) % 1
+        const f = t >= f0 && t < f1 ? clamp((t - f0) / D) : 0
+        p.mat.opacity = alpha * (0.55 + 0.4 * (1 - f))
         p.frame.material.opacity = alpha * 0.5
       }
       // hit9 滑动变焦：z 压扁、xy 放大 → 通道被"吸"长
@@ -986,37 +1021,112 @@ function drawDescentBall(g, ctx, t, gd, depth) {
  * 修法不是给检测开口子，而是**让两者不同时占据同一块画面**：
  * 翻牌在场时把公式云**整体上移 + 缩小 + 淡出**，让计数那一拍单独成立（§4.4 也要求别堆在一起）。
  */
-function drawTidalFormulas(g, ctx, t, heat, suppress = 0) {
+/* ================================================================== *
+ * T25：段 K 的「公式碎片」装饰改用**粒子字形**（`§1.10 hit4` 之外的密度由它承担）
+ * ------------------------------------------------------------------
+ * T25 原文：「段 K 的公式碎片改为同屏 **≤8 条且 ≥64px**，其余装饰用**粒子字形（不当文本）**」。
+ * 所以：
+ *   · **文本**公式只留 4 条（≤8）、字号 68px（≥64）、走真圆周轨道 —— 见 `drawTidalFormulas`；
+ *   · 其余"风暴"密度由下面这个 **Points 粒子场**给：字形用 `tokenSprite()` 预渲染成贴图，
+ *     在那个小画布上是**裸 fillText**（不经过 `text()`）→ 它们是**图形，不是文本**，
+ *     因此不计入 §0.5 字号下限、也不进 §2.8/§2.3 的文字重叠判据。
+ * ================================================================== */
+function buildFormulaDust() {
+  const GLYPHS = [
+    { t: '∂', c: '#c9a6ff' },
+    { t: 'Σ', c: '#8fd8ff' },
+    { t: '∫', c: '#ffb0e0' },
+  ]
+  const grp = new THREE.Group()
+  grp.name = 'k:fdust'
+  const clouds = GLYPHS.map((gl, ci) => {
+    const N = 130
+    const geo = new THREE.BufferGeometry()
+    const arr = new Float32Array(N * 3)
+    geo.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+    const mat = new THREE.PointsMaterial({
+      size: 0.055,
+      map: tokenSprite(gl.t, gl.c),
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+    })
+    const pts = new THREE.Points(geo, mat)
+    pts.visible = false
+    grp.add(pts)
+    return { pts, arr, N, geo, mat, seed: 700 + ci * 13 }
+  })
+  return {
+    object: grp,
+    clouds,
+    /** @param {{alpha:number}} o */
+    update(t, o = {}) {
+      const { alpha = 0 } = o
+      grp.visible = alpha > 0.01
+      if (!grp.visible) return
+      for (const c of clouds) {
+        c.mat.opacity = 0.55 * alpha
+        for (let i = 0; i < c.N; i++) {
+          // 绕黑洞的同心环流：内环快、外环慢，再加一点纵向抬升
+          const ph = hash01(i, c.seed) * TAU
+          const r = 0.55 + hash01(i, c.seed + 1) * 1.35
+          const ang = ph + t * (0.9 - r * 0.35)
+          c.arr[i * 3] = Math.cos(ang) * r
+          c.arr[i * 3 + 1] = Math.sin(ang) * r * 0.62 + (hash01(i, c.seed + 2) - 0.5) * 0.5
+          c.arr[i * 3 + 2] = -0.3 + (hash01(i, c.seed + 3) - 0.5) * 0.8
+        }
+        c.geo.attributes.position.needsUpdate = true
+      }
+    },
+  }
+}
+
+/** T25 / §1.10 hit4：绕黑洞的**真圆周轨道**里只有 4 条公式（≤8），每条 **68px**（≥64）。 */
+const ORBIT_FORMULAS = ['∇L', 'Σ1/n²', 'e^{iπ}+1=0', 'KV(t)']
+
+/**
+ * T25 重写：hit4「公式风暴绕黑洞盘旋并被潮汐拉长」。
+ *
+ * 旧实现的三个问题（这次一并改掉）：
+ *   ① **不是圆周轨道** —— `r = (1-phase)*H*0.62` 是**收缩螺旋**，公式从外向内掉；
+ *   ② 字号只有 **20px**（T25 要求 ≥64px），且同屏 5 条 × 27 字符 → 需要一整套
+ *      "抑制期压 stretch / 夹 y" 的打补丁逻辑才不撞翻牌（那套逻辑现在就删掉了）；
+ *   ③ 潮汐形变是 `rotate(ang*0.4)` + `scale(stretch, …)`，**拉伸方向与半径方向无关**，
+ *      看起来只是"斜着变长"，不是潮汐。
+ *
+ * 现在：圆心 = 黑洞的屏幕位置（与 render 里 BH 的世界偏移 +0.18 一致，由相机反算），
+ * 半径恒定（只有 ±5% 呼吸），`rotate(ang)` 让局部 x 轴**对齐半径方向**，
+ * 于是 `scale(stretch, 0.86)` 就是**径向拉长 + 切向压缩** —— 这才是潮汐形变。
+ * 文本公式只在 hit4 窗口出现（`win`），其余时间的密度交给 `buildFormulaDust()` 的粒子字形。
+ */
+function drawTidalFormulas(g, ctx, t, heat, suppress = 0, win = 0) {
   const { W, H } = ctx
-  const list = [FORMULAS.softmax, FORMULAS.crossentropy, FORMULAS.attention, FORMULAS.kv, FORMULAS.limit]
-  g.save()
-  for (let i = 0; i < list.length; i++) {
-    const phase = (t * 0.16 + i / list.length) % 1
-    const ang = phase * TAU * 1.6 + i * 1.1
-    // 半径：被抑制时收到 55%，并把轨道中心上移，避开翻牌所在的 y ≥ 0.60H 带
-    const r = (1 - phase) * H * 0.62 * (1 - 0.55 * suppress)
-    const x = W / 2 + Math.cos(ang) * r * 1.15
-    const yRaw = H * (0.5 - 0.20 * suppress) + Math.sin(ang) * r * 0.5
-    // 翻牌在场时（suppress>0）把锚点 y 夹在翻牌带之上。
-    const y = suppress > 0.01 ? Math.min(yRaw, H * 0.50) : yRaw
-    // ⚠️ 只夹锚点是不够的 —— 实测 159.0s 仍报 `t(1122,749) ∩ thai(1133,763)`。
-    // 原因：`drawMath` 把整条公式排在**局部 x 轴**上，而这里先 `scale(stretch, 1-…)`（stretch 最大 3.4）
-    // 再 `rotate(ang*0.4)`；当转角接近 90° 时，一条 27 字符的公式（约 27×12×3.4 ≈ 1100px）
-    // 会**整条竖过来**、从锚点向上下各铺约 550px —— 于是它必然扫过 y≈763 的书写系统名那一行。
-    // 实测该帧 size=20 的旋转盒共 **135 个**（= 5 条公式 × 27 段），y 从 −252 一直到 912，正是这个形状。
-    // 所以抑制期必须**一起压缩链长**：把 stretch 收到 30%，跨度降到 ±146px 左右，
-    // 配上锚点 y ≤ 0.50H，整条公式就停在 y ≈ [394, 686]，与 763 那一行留出余量。
-    const stretchRaw = 1 + phase * 2.4 // 潮汐拉长
-    const stretch = suppress > 0.01 ? stretchRaw * (1 - 0.7 * suppress) : stretchRaw
+  if (!(win > 0.01)) return
+  const cam = ctx.three.camera
+  const dist = 3.1
+  const halfH = Math.abs(dist) * Math.tan(((cam.fov || 40) * Math.PI) / 180 / 2)
+  const halfW = halfH * (cam.aspect || 16 / 9)
+  const cx = (0.5 + 0.18 / (2 * halfW)) * W // 黑洞屏幕 x
+  const cy = H * 0.44
+  const R = W * 0.20
+  const N = ORBIT_FORMULAS.length
+  const spin = t * 0.42
+  for (let i = 0; i < N; i++) {
+    const ang = spin + (i / N) * TAU
+    const r = R * (1 + 0.05 * Math.sin(t * 0.9 + i))
+    const x = cx + Math.cos(ang) * r
+    const y = cy + Math.sin(ang) * r * 0.86
+    const phase = (i / N + t * 0.1) % 1
     g.save()
-    g.globalAlpha = clamp(0.18 + phase * 0.7) * (0.6 + 0.4 * heat) * (1 - 0.85 * suppress)
+    g.globalAlpha = win * clamp(0.4 + 0.6 * (1 - Math.abs(phase - 0.5) * 2)) * (0.75 + 0.25 * heat)
     g.translate(x, y)
-    g.rotate(ang * 0.4)
-    g.scale(stretch, 1 - phase * 0.35)
-    drawMath(g, 0, 0, list[i], 20, { color: phase > 0.7 ? C.pink : C.purple, align: 'center' })
+    g.rotate(ang) // 局部 x 轴 = 半径方向
+    g.scale(1 + 0.2 * phase, 0.86) // 潮汐：径向拉长、切向压缩
+    drawMath(g, 0, 0, ORBIT_FORMULAS[i], 68, { color: i % 2 ? C.pink : C.purple, align: 'center' })
     g.restore()
   }
-  g.restore()
 }
 
 /* ---------------- 工具调用卡片飞入（§7 段 K：工具调用只在**侧带**） ----------------

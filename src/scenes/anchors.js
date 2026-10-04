@@ -28,6 +28,10 @@
 export const ANCHORS = {
   A: {
     power: { kind: 'word', text: 'power', event: 'CRT 亮起 / 电源图标', lead: 0.3 }, // 1.214
+    // T15 / FIX_V4 §1.1：`protection` 在歌词里是**唱的**（`Remember to put on protection`，句 t0=1.93），
+    // 但此前**从未声明锚点** → `cues.t('A','protection')` 返回 null，盾牌/锁描边无从对齐。
+    // 补上它，让"盾牌/锁描边"卡在词上（§2.2：事件一律来自锚点）。
+    protection: { kind: 'word', text: 'protection', event: '盾牌/锁描边', lead: 0.3 },
     pieces: { kind: 'word', text: 'pieces', event: '参数晶格铺开', lead: 0.35 }, // 4.901
     object: { kind: 'word', text: 'object', event: '线框立方体创建', lead: 0.3 }, // 6.445
     parameters: { kind: 'word', text: 'parameters', event: '数值条充能', lead: 0.3 }, // 8.5xx
@@ -76,6 +80,10 @@ export const ANCHORS = {
   },
   E: {
     stimulation: { kind: 'word', text: 'stimulations', event: '粒子迸发', lead: 0.3, loose: true }, // 61.21x
+    // T18b / FIX_V4 §1.6 E2：`satisfaction` 这个词**在歌词里是唱的**（`Then I can be your only satisfaction`，
+    // 实测词时间 **65.70**），但**一直没有声明锚点** → timeline 里没有这个键，场景只能退到 fallback，
+    // 画面与歌词不同步。这里按实测补上（与 T15 给 `protection` 补锚点同一手法）。
+    satisfaction: { kind: 'word', text: 'satisfaction', event: '金色奖励宝珠长大 + 射出光线', lead: 0.3 }, // 65.700
     happy: { kind: 'word', text: 'happy', event: 'W1 出场', lead: 0.35 }, // 66.6xx
     execution: { kind: 'word', text: 'execution', event: '巨大 ▶ + 闪白', lead: 0.3 }, // 68.5xx
     trapped: { kind: 'word', text: 'trapped', event: '网格墙合拢成笼', lead: 0.35 }, // 70.3xx

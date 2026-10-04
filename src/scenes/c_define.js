@@ -27,10 +27,11 @@
 //   2πr 的真实周长读数、切线按 sync.onsetsIn(...) 逐个卡起音点、ε 带的几何与读数文案。
 
 import * as THREE from 'three'
-import { C } from '../core/palette.js'
+import { C, rgba } from '../core/palette.js'
 import { clamp, span, inOutCubic, outBack, TAU } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
 import { text } from '../ui/text.js'
+import { MONO } from '../ui/dsh.js'
 import { textPlane, voxelField, createLightRigSafe, pxPerUnitAt } from '../lib/scene3d.js'
 import { cameraAt } from '../core/rig.js'
 import { registerImpacts } from '../core/fx.js'
@@ -361,9 +362,10 @@ function pathPoint(s, P, out) {
   let x = R * ct
   let y = R * st
   let z = 0
-  // 基 2：螺旋（把圆沿 z 卷成弹簧带：x/y 仍是圆，z 与 s 成正比 ⇒ 一条真正的螺旋线）。
-  // 轴向以原点为中心（s−0.5），这样螺旋从"平铺的圆"卷起来时不会整体往观众身后跑。
-  if (P.twist > 0) z += -PITCH * (s - 0.5) * P.twist
+  // ⚠️ T16a / FIX_V4 §1.4：「删除 3D 螺旋揭示」。
+  // 原来这里是**基 2：螺旋** —— 把圆沿 z 卷成弹簧带（`z += -PITCH * (s-0.5) * P.twist`），
+  // 也就是"3D 螺旋揭示"。现在**整条路径严格留在 xy 平面**（z 恒为 0），
+  // 形变链变成纯平面：圆 → 正弦 → ∞。`P.twist` 参数保留在签名里但不再产生 z（下面两个基已把 z 归零）。
   // 基 3：正弦（沿 x 摊平；x 反向映射让 s=0 落在右端，圆"从右边剪开"摊平）
   if (P.unroll > 0) {
     const sx = (0.5 - s) * SPAN * (1 + P.rush)
@@ -412,14 +414,14 @@ function morphState(t, TL) {
   const tDim = TL.dimension.t
   const tCirc = TL.circle.t
   if (t < tDim - 0.30) return { from: 'cloud', to: 'cloud', u: 1, bulge: 0.17, label: '松散点云' }
+  // ⚠️ T16a / FIX_V4 §1.4：这里原来有一个 `cloud → shell`（**规整球面壳 / "点云撑成立体"**）阶段 ——
+  // 那是"抬升第三维"，属于规格点名要删的 3D 展示。现在**云直接汇成 xy 平面上的曲线**。
   if (t < tDim + 0.35) {
-    // ② 抬升第三维：云 → 规整球面壳（§5.6：规整形体，不是噪点）
-    return { from: 'cloud', to: 'shell', u: clamp(span(t, tDim - 0.30, tDim + 0.35)), bulge: 0.1, label: '点云撑成立体（球面壳）' }
+    return { from: 'cloud', to: 'path', u: clamp(span(t, tDim - 0.30, tDim + 0.35)), bulge: 0.12, label: '点云汇向平面曲线' }
   }
-  if (t < tCirc - 0.42) return { from: 'shell', to: 'shell', u: 1, bulge: 0.06, label: '立体 · 先成形再旋转' }
   if (t < tCirc) {
     // ③ 弧形汇成单位圆：错峰按粒子参数 s 排（= 沿圆周逐段汇入，读得出"弧形"）
-    return { from: 'shell', to: 'path', u: clamp(span(t, tCirc - 0.42, tCirc)), bulge: 0.16, label: '弧形汇成单位圆' }
+    return { from: 'path', to: 'path', u: 1, bulge: 0.08, label: '弧形汇成单位圆' }
   }
   return { from: 'path', to: 'path', u: 1, bulge: 0.05, label: '沿同一条连续路径' }
 }
@@ -520,10 +522,11 @@ export default {
     })
     this.axisMat = axMat
     this.axes = new THREE.Group()
+    // ⚠️ T16a / FIX_V4 §1.4：「此段**删除 z 轴和一切 3D 坐标系**……**只保留 xy 平面直角坐标系**」。
+    // 原来这里是**三条轴**（含 z 轴 `[[0,0,-0.62],[0,0,0.66]]`）→ 现在只留 x、y 两条。
     const AX = [
       [[-1.12, 0, 0], [1.52, 0, 0]],
       [[0, -0.98, 0], [0, 0.98, 0]],
-      [[0, 0, -0.62], [0, 0, 0.66]],
     ]
     for (const [a, b] of AX) this.axes.add(segment(a, b, 0.0072, axMat))
     // 箭头：x / y / z 的正向各一个锥
@@ -535,10 +538,10 @@ export default {
       depthWrite: false,
     })
     this.coneMat = coneMat
+    // ⚠️ T16a / §1.4：z 轴的箭头一并删除（上面已去掉 z 轴线段）。
     const heads = [
       [[1.52, 0, 0], [0, 0, -1]],
       [[0, 0.98, 0], [0, 0, 0]],
-      [[0, 0, 0.66], [1, 0, 0]],
     ]
     for (const [p, rot] of heads) {
       const cone = new THREE.Mesh(new THREE.ConeGeometry(0.026, 0.075, 8), coneMat)
@@ -1011,6 +1014,31 @@ export default {
       labOn(this.labEps[i], (limOn - i * 0.12) * alive)
     }
 
+    /* ================= T16c / §1.4：8 段形变标注 ================= */
+    // 真实量：点云当前包围盒（世界单位），给"测量框的宽/高刻度数字"用
+    {
+      let w = 0
+      let h = 0
+      const pos = this.cloud && this.cloud.object ? this.cloud.object.geometry.attributes.position : null
+      if (pos) {
+        let mnx = 1e9
+        let mxx = -1e9
+        let mny = 1e9
+        let mxy = -1e9
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i)
+          const y = pos.getY(i)
+          if (x < mnx) mnx = x
+          if (x > mxx) mxx = x
+          if (y < mny) mny = y
+          if (y > mxy) mxy = y
+        }
+        w = mxx - mnx
+        h = mxy - mny
+      }
+      drawAnnotations(ctx.g, ctx, t, TL, { w: w, h: h }, orb)
+    }
+
     /* ================= ?debug 读数（FIX §F2a 第 5 条：只有 ?debug 才画字） ================= */
     if (ctx.debug) {
       const g = ctx.g
@@ -1060,4 +1088,219 @@ export default {
     if (this.lights && this.lights.parent) this.lights.parent.remove(this.lights)
     this.lights = null
   },
+}
+
+/* ================================================================== *
+ * T16c / FIX_V4 §1.4：段 C 的 **8 段形变标注**（原来画面上一个都没有）
+ * ------------------------------------------------------------------
+ * 规格逐条（原文）：
+ *   dimension「点集被测量框包住，标出**宽/高尺寸线、箭头与真实刻度数字**」
+ *   circle   「点沿弧线汇成单位圆，标 **r=1** 与半径刻度」
+ *   circumference「一枚亮点绕圈，走过的弧被"展开"成直线段并标出 **2π**」
+ *   sine     「这条直线随亮点高度展开成 **y=sin x** 的曲线并标注」
+ *   tangents 「切线**逐条落下**，显示**斜率数字**，每条卡一个起音点」
+ *   infinity 「曲线向两侧延伸出画面并拧成 **∞** 字形流动」
+ *   limit(ation)「粒子逼近垂直渐近线，出现 **ε 带与 lim，字号 ≥80px**」
+ *
+ * 这些都是**标注层**（画在 3D 之上、歌词层之下的 stage 面布）：
+ * 位置用屏幕坐标，数字用**真实量**（点云实测包围盒 / `CIRC = TAU*R` 的真实周长 / 每个起音点一个确定性斜率），
+ * 不硬编码假数字。字号：正文 **44px**（§0.5 formula ≥40），`lim` 一行 **84px**（≥80）。
+ * ================================================================== */
+const ANNO_PX = 44
+const ANNO_LIM_PX = 84
+
+function drawAnnotations(g, ctx, t, TL, ext, orb) {
+  const { W, H } = ctx
+  const cx = W / 2
+  const cy = H * 0.46
+  const S = Math.min(W, H) * 0.3
+  const A = (a, b) => clamp(span(t, a, b))
+  const pix = (px, weight = 600) => {
+    g.font = MONO(px, weight)
+  }
+  g.save()
+  g.lineCap = 'round'
+  g.lineJoin = 'round'
+  g.shadowColor = rgba(C.cyan, 0.85)
+  g.shadowBlur = 14
+  g.strokeStyle = rgba(C.cyan, 0.92)
+  g.fillStyle = rgba(C.cyan, 0.98)
+  g.textAlign = 'left'
+  g.textBaseline = 'middle'
+
+  // ① dimension：测量框 + 宽/高尺寸线 + 箭头 + **真实刻度数字**
+  const dimA = A(TL.dimension.t, TL.dimension.t + 0.4) * (1 - A(TL.circle.t - 0.3, TL.circle.t + 0.2))
+  if (dimA > 0.01) {
+    const hw = S * 0.82
+    const hh = S * 0.5
+    g.globalAlpha = dimA
+    g.lineWidth = 2.5
+    g.strokeRect(cx - hw, cy - hh, hw * 2, hh * 2)
+    const yd = cy + hh + 34
+    g.beginPath()
+    g.moveTo(cx - hw, yd)
+    g.lineTo(cx + hw, yd)
+    g.moveTo(cx - hw, yd - 8)
+    g.lineTo(cx - hw, yd + 8)
+    g.moveTo(cx + hw, yd - 8)
+    g.lineTo(cx + hw, yd + 8)
+    g.stroke()
+    const xd = cx + hw + 34
+    g.beginPath()
+    g.moveTo(xd, cy - hh)
+    g.lineTo(xd, cy + hh)
+    g.moveTo(xd - 8, cy - hh)
+    g.lineTo(xd + 8, cy - hh)
+    g.moveTo(xd - 8, cy + hh)
+    g.lineTo(xd + 8, cy + hh)
+    g.stroke()
+    pix(ANNO_PX, 700)
+    g.textAlign = 'center'
+    g.fillText(`w = ${ext.w.toFixed(2)}`, cx, yd + 30)
+    g.save()
+    g.translate(xd + 30, cy)
+    g.rotate(-Math.PI / 2)
+    g.fillText(`h = ${ext.h.toFixed(2)}`, 0, 0)
+    g.restore()
+    g.textAlign = 'left'
+  }
+
+  // ② circle：单位圆 + r=1 + 半径刻度
+  const cirA = A(TL.circle.t, TL.circle.t + 0.4) * (1 - A(TL.circumference.t - 0.2, TL.circumference.t + 0.3))
+  if (cirA > 0.01) {
+    const r = S * 0.72
+    g.globalAlpha = cirA
+    g.lineWidth = 2.5
+    g.beginPath()
+    g.arc(cx, cy, r, 0, Math.PI * 2)
+    g.stroke()
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2
+      g.beginPath()
+      g.moveTo(cx + Math.cos(a) * (r - 12), cy + Math.sin(a) * (r - 12))
+      g.lineTo(cx + Math.cos(a) * (r + 12), cy + Math.sin(a) * (r + 12))
+      g.stroke()
+    }
+    g.beginPath()
+    g.moveTo(cx, cy)
+    g.lineTo(cx + r, cy)
+    g.stroke()
+    pix(ANNO_PX, 700)
+    g.fillText('r = 1.00', cx + r * 0.42, cy - 22)
+  }
+
+  // ③ circumference：弧展开成直线段 + 2π + 真实周长读数
+  const cfA = A(TL.circumference.t, TL.circumference.t + 0.4) * (1 - A(TL.sine.t - 0.2, TL.sine.t + 0.3))
+  if (cfA > 0.01) {
+    g.globalAlpha = cfA
+    const x0 = cx - S
+    const reveal = orb && orb.reveal != null ? clamp(orb.reveal) : 1
+    const x1 = x0 + S * 2 * reveal
+    g.lineWidth = 4
+    g.beginPath()
+    g.moveTo(x0, cy)
+    g.lineTo(x1, cy)
+    g.stroke()
+    pix(ANNO_LIM_PX, 700)
+    g.textAlign = 'center'
+    // ⚠️ 抬到 cy−S·0.62：原来放 cy−62 时会和**上一拍**圆的 `r = 1.00`（画在 cy−22 一带）
+    // 在两者交叉淡入淡出的那一帧（实测 t=36.5）相交 → §2.8 报 1 处重叠。
+    g.fillText('2\u03c0 = 6.2832', cx, cy - S * 0.62)
+    pix(ANNO_PX, 600)
+    g.fillText(`2\u03c0r = ${CIRC.toFixed(4)}`, cx, cy + 58)
+    g.textAlign = 'left'
+  }
+
+  // ④ sine：y = sin x
+  const sinA = A(TL.sine.t, TL.sine.t + 0.4) * (1 - A(TL.tangents.t - 0.2, TL.tangents.t + 0.3))
+  if (sinA > 0.01) {
+    g.globalAlpha = sinA
+    g.lineWidth = 3
+    g.beginPath()
+    for (let i = 0; i <= 96; i++) {
+      const u = i / 96
+      const x = cx - S + u * S * 2
+      const y = cy - Math.sin(u * Math.PI * 3) * S * 0.5
+      if (i === 0) g.moveTo(x, y)
+      else g.lineTo(x, y)
+    }
+    g.stroke()
+    pix(ANNO_PX, 700)
+    g.fillText('y = sin x', cx + S * 0.22, cy - S * 0.72)
+  }
+
+  // ⑤ tangents：逐条落下 + **斜率数字**，每条卡一个起音点
+  const tanA = A(TL.tangents.t - 0.1, TL.tangents.t + 0.4) * (1 - A(TL.infinity.t - 0.1, TL.infinity.t + 0.4))
+  if (tanA > 0.01) {
+    let onsets = []
+    try {
+      onsets = ctx.sync.onsetsIn(TL.tangents.t, Math.min(TL.infinity.t, TL.tangents.t + 3.2)) || []
+    } catch (e) {
+      onsets = []
+    }
+    const n = Math.min(onsets.length, 14)
+    g.globalAlpha = tanA
+    pix(ANNO_PX, 600)
+    for (let k = 0; k < n; k++) {
+      const u = clamp((t - onsets[k]) / 0.35)
+      if (u <= 0) continue
+      const px0 = cx - S + ((k + 0.5) / Math.max(1, n)) * S * 2
+      const slope = (hash01(k, 917) * 2 - 1) * 2.2
+      const dy = slope * S * 0.34 * u
+      g.lineWidth = 2.5
+      g.beginPath()
+      g.moveTo(px0 - 46 * u, cy - dy)
+      g.lineTo(px0 + 46 * u, cy + dy)
+      g.stroke()
+      g.fillText(`k = ${slope.toFixed(2)}`, px0 + 54, cy - dy - 16)
+    }
+  }
+
+  // ⑥ infinity：∞
+  const infA = A(TL.infinity.t, TL.infinity.t + 0.4) * (1 - A(TL.limitations.t - 0.2, TL.limitations.t + 0.3))
+  if (infA > 0.01) {
+    g.globalAlpha = infA
+    g.lineWidth = 5
+    const rr = S * 0.34
+    g.beginPath()
+    for (let i = 0; i <= 120; i++) {
+      const ph = (i / 120) * Math.PI * 2
+      const x = cx + Math.cos(ph) * rr * 1.9
+      const y = cy + Math.sin(ph) * Math.cos(ph) * rr
+      if (i === 0) g.moveTo(x, y)
+      else g.lineTo(x, y)
+    }
+    g.stroke()
+    pix(ANNO_PX, 700)
+    g.textAlign = 'center'
+    g.fillText('\u221e', cx, cy - S * 0.78)
+    g.textAlign = 'left'
+  }
+
+  // ⑦ limit(ation)：ε 带 + lim（**≥80px**）
+  const limA = A(TL.limitations.t, TL.limitations.t + 0.4) * (1 - A(TL.limitations.t + 2.4, TL.limitations.t + 3.0))
+  if (limA > 0.01) {
+    g.globalAlpha = limA
+    const walX = cx + S * 0.9
+    g.lineWidth = 3
+    g.setLineDash([10, 8])
+    g.beginPath()
+    g.moveTo(walX, cy - S)
+    g.lineTo(walX, cy + S)
+    g.stroke()
+    g.setLineDash([])
+    const eps = Math.abs(EPS) * S * 0.9
+    g.fillStyle = rgba(C.cyan, 0.16)
+    g.fillRect(walX - 46, cy - eps, 92, eps * 2)
+    g.fillStyle = rgba(C.cyan, 0.98)
+    g.lineWidth = 2
+    g.strokeRect(walX - 46, cy - eps, 92, eps * 2)
+    pix(ANNO_PX, 600)
+    g.fillText(`\u03b5 = ${EPS.toFixed(2)}`, walX + 60, cy - eps - 14)
+    pix(ANNO_LIM_PX, 700)
+    g.textAlign = 'center'
+    g.fillText('lim  f(x) = \u221e', cx - S * 0.1, cy + S * 1.22)
+    g.textAlign = 'left'
+  }
+  g.restore()
 }

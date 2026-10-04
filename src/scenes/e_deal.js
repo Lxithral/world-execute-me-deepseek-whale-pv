@@ -47,7 +47,6 @@ import { hash01 } from '../core/rng.js'
 import { text, TEXT_MIN, setTextureSpace, isTextureSpace } from '../ui/text.js'
 import {
   textPlane,
-  wireShape,
   voxelField,
   createLightRigSafe,
   pxPerUnitAt,
@@ -483,6 +482,153 @@ function burstPos(out, i, ox, oy, oz, dx, dy, dz, dt, spread) {
   out[i * 3 + 2] = oz + dz * rad
 }
 
+/* ================================================================== *
+ * T18a / FIX_V4 §1.6 E1：**3D 神经网络**（信号脉冲逐层传播，相机推进，青→洋红）
+ * ------------------------------------------------------------------
+ * 4 层，节点数 4/6/6/4 = 20；相邻层**全连接** 24+36+24 = 84 条线。
+ * 节点用 InstancedMesh + 逐实例颜色：色相随层从 **青(0.50) → 洋红(0.83)**，亮度随"脉冲扫过"变亮。
+ * "逐层传播"就是让一个 `sweep` 值随时间在 0..3 层之间推进，离 sweep 越近的层越亮 ——
+ * 于是脉冲**一层一层**过去，而不是整体一起闪。
+ * 相机推进的观感用 `object.position.z` 从 0.9 推到 −0.6（靠近观众）+ 整体缓慢放大实现。
+ * ================================================================== */
+const NET_LAYERS = [4, 6, 6, 4]
+const NET_X = [-1.25, -0.42, 0.42, 1.25]
+
+/**
+ * T18b / FIX_V4 §1.6 E2（`satisfaction` 65.70）：
+ * 「**金色奖励宝珠随每拍长大并射出光线**，相机**绕行**；**金→白**」。
+ * 实现要点：
+ *   · **长大**由调用方按"窗口内已经过的起音点数"算半径并传进来（`radius`）—— 真的是"随每拍"；
+ *   · **射出光线**用 12 条细长锥（`ConeGeometry`），长度随节拍脉动并绕球心分布；
+ *   · **相机绕行**的观感用 `group.rotation.y/z` 自转 + 相对相机的横向摆位实现（本文件不建相机，§注释有说明）；
+ *   · **金→白**：`core/halo/ray` 三件套的颜色一起从 `#ffd479` lerp 到 `#ffffff`（`white` 由调用方给）。
+ */
+function buildRewardOrb() {
+  const grp = new THREE.Group()
+  grp.name = 'e:orb'
+  const coreMat = new THREE.MeshBasicMaterial({ color: 0xffe6a3, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.16, 24, 18), coreMat)
+  const haloMat = new THREE.MeshBasicMaterial({ color: 0xffc46b, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(0.3, 20, 14), haloMat)
+  const rayMat = new THREE.MeshBasicMaterial({ color: 0xffe9b8, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
+  const rays = []
+  for (let i = 0; i < 12; i++) {
+    const m = new THREE.Mesh(new THREE.ConeGeometry(0.013, 0.42, 6), rayMat)
+    grp.add(m)
+    rays.push(m)
+  }
+  grp.add(halo, core)
+  const GOLD = new THREE.Color(0xffd479)
+  const WHITE = new THREE.Color(0xffffff)
+  const col = new THREE.Color()
+  return {
+    object: grp,
+    core: core,
+    halo: halo,
+    rays: rays,
+    update(t, o = {}) {
+      const alpha = o.alpha == null ? 1 : o.alpha
+      const radius = o.radius == null ? 0.16 : o.radius
+      const rayLen = o.rayLen == null ? 1 : o.rayLen
+      const white = clamp(o.white == null ? 0 : o.white)
+      grp.visible = alpha > 0.01
+      if (!grp.visible) return
+      // 相机绕行：自转（本文件不建相机，rig 负责位移，这里给"绕行"的相对转动）
+      grp.rotation.y = t * 0.38
+      grp.rotation.z = t * 0.13
+      const k = Math.max(0.05, radius / 0.16)
+      core.scale.setScalar(k)
+      halo.scale.setScalar(k * (1 + 0.12 * Math.sin(t * 4)))
+      coreMat.opacity = alpha * 0.95
+      haloMat.opacity = alpha * 0.34
+      rayMat.opacity = alpha * 0.72
+      col.copy(GOLD).lerp(WHITE, white)
+      coreMat.color.copy(col)
+      haloMat.color.copy(col)
+      rayMat.color.copy(col)
+      for (let i = 0; i < rays.length; i++) {
+        const a = (i / rays.length) * Math.PI * 2 + t * 0.2
+        const L = rayLen * (0.7 + 0.5 * Math.abs(Math.sin(t * 3.1 + i)))
+        rays[i].position.set(Math.cos(a) * (radius + 0.2 * L), Math.sin(a) * (radius + 0.2 * L), 0)
+        rays[i].rotation.z = a - Math.PI / 2
+        rays[i].scale.set(1, L, 1)
+      }
+    },
+  }
+}
+
+function buildNeuralNet() {
+  const grp = new THREE.Group()
+  grp.name = 'e:net'
+  const nodes = []
+  for (let L = 0; L < NET_LAYERS.length; L++) {
+    const n = NET_LAYERS[L]
+    for (let i = 0; i < n; i++) {
+      nodes.push({ L: L, x: NET_X[L], y: (i - (n - 1) / 2) * 0.34 })
+    }
+  }
+  const mat = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  })
+  const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.045, 10, 8), mat, nodes.length)
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(nodes.length * 3), 3)
+  mesh.frustumCulled = false
+  // 相邻层全连接
+  const seg = []
+  for (let L = 0; L + 1 < NET_LAYERS.length; L++) {
+    for (const a of nodes.filter((q) => q.L === L)) {
+      for (const b of nodes.filter((q) => q.L === L + 1)) seg.push(a.x, a.y, 0, b.x, b.y, 0)
+    }
+  }
+  const lgeo = new THREE.BufferGeometry()
+  lgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(seg), 3))
+  const lmat = new THREE.LineBasicMaterial({
+    color: 0x7fe6ff,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  })
+  const lines = new THREE.LineSegments(lgeo, lmat)
+  lines.frustumCulled = false
+  grp.add(lines, mesh)
+  const dummy = new THREE.Object3D()
+  const col = new THREE.Color()
+  return {
+    object: grp,
+    mesh: mesh,
+    nodes: nodes,
+    update(t, o = {}) {
+      const alpha = o.alpha == null ? 1 : o.alpha
+      const u = o.u == null ? 0 : o.u
+      const advance = o.advance == null ? 0 : o.advance
+      grp.visible = alpha > 0.01
+      if (!grp.visible) return
+      mat.opacity = alpha
+      lmat.opacity = 0.16 * alpha
+      grp.position.z = 0.9 - 1.5 * advance
+      grp.scale.setScalar(1 + 0.35 * advance)
+      const sweep = (u * 3) % 3 // 0..3 层之间推进
+      for (let k = 0; k < nodes.length; k++) {
+        const nd = nodes[k]
+        const hot = Math.max(0, 1 - Math.abs(nd.L - sweep))
+        dummy.position.set(nd.x, nd.y, 0)
+        dummy.scale.setScalar(0.7 + 1.5 * hot)
+        dummy.updateMatrix()
+        mesh.setMatrixAt(k, dummy.matrix)
+        // 青(0.50) → 洋红(0.83)
+        col.setHSL(0.5 + 0.33 * (nd.L / 3), 0.85, 0.32 + 0.42 * hot)
+        mesh.setColorAt(k, col)
+      }
+      mesh.instanceMatrix.needsUpdate = true
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    },
+  }
+}
+
 function createBurst(count) {
   const geo = new THREE.BufferGeometry()
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3))
@@ -591,16 +737,17 @@ function makeGridTexture(px = 256) {
     const p = Math.round((i / N) * px) + 0.5
     const main = i === 0
     // 每一格：一条冷青主线 + 一条更宽的暗底（玻璃的反光带）
-    g.strokeStyle = main ? 'rgba(160,240,255,0.72)' : 'rgba(130,215,255,0.34)'
-    g.lineWidth = main ? 3 : 1.6
+    // T19b：主线加亮加粗（删掉遗留紫环后，笼子是本拍**唯一**的光源，太细就撑不起「冷蓝」这一拍）
+    g.strokeStyle = main ? 'rgba(190,245,255,0.95)' : 'rgba(150,225,255,0.5)'
+    g.lineWidth = main ? 4 : 2.2
     g.beginPath()
     g.moveTo(p, 0)
     g.lineTo(p, px)
     g.moveTo(0, p)
     g.lineTo(px, p)
     g.stroke()
-    g.strokeStyle = 'rgba(40,90,140,0.28)'
-    g.lineWidth = main ? 9 : 5
+    g.strokeStyle = 'rgba(45,105,165,0.35)'
+    g.lineWidth = main ? 11 : 6
     g.beginPath()
     g.moveTo(p, 0)
     g.lineTo(p, px)
@@ -659,27 +806,17 @@ export default {
     this.lights = createLightRigSafe()
     T.stage3d.add(this.lights)
 
-    /* ---------- ① 超立方体：巨大化并旋转 ---------- */
-    // baseSize 0.30：4D→3D 透视投影在 |w| ≤ ~1.6 时最多把顶点撑到 4.7×size，
-    // 再乘上运行时 scale（最大 3.4）得到最大半径 ≈1.0 世界单位 → 直径 ≈2.0 = 画面高的 87%。
-    // 这是"巨大化"的量化依据，不是拍脑袋。
-    this.cube = createHypercube(0.3, '#c792ea')
-    this.grp.add(this.cube.object)
+    /* ---------- ① E1 stimulations：3D 神经网络（T18a / §1.6） ---------- */
+    // ⚠️ FIX_V4 §1.6 第一句：「旧画面(**紫色半透明球体 + 方块 + 线框**)全部删除」。
+    // 原来是三件套：`createHypercube(0.3, '#c792ea')`（**紫色**线框方块/超立方体）
+    // + `wireShape('box', …)` 的青色外框 + 金色小方块 core —— **整组删除**。
+    // E1 改为「3D **神经网络**，**信号脉冲逐层传播**，**相机推进**；**青→洋红**」。
+    this.net = buildNeuralNet()
+    this.grp.add(this.net.object)
 
-    // 外框：用 scene3d 的 box 线框（12 条细圆柱，比 LineSegments 更能吃光照、更有厚度）
-    this.frame = wireShape('box', { size: 0.5, color: 0x7fd8ff, radius: 0.0085 })
-    this.grp.add(this.frame.object)
-
-    // 立方体中心的一颗发光核（"交易"的标的物）
-    this.coreMat = new THREE.MeshBasicMaterial({
-      color: 0xffe6a3,
-      transparent: true,
-      opacity: 0.9,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    this.core = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), this.coreMat)
-    this.grp.add(this.core)
+    /* ---------- ①b E2 satisfaction：金色奖励宝珠（T18b / §1.6 E2） ---------- */
+    this.orb = buildRewardOrb()
+    this.grp.add(this.orb.object)
 
     /* ---------- ② 彩色粒子迸发 ---------- */
     this.burst = createBurst(BURST_PER * BURST_MAX)
@@ -757,11 +894,13 @@ export default {
     this.gridTex = makeGridTexture(256)
     this.walls = []
     const wallSpec = [
-      { o: [0, 0, -1.35], r: [0, 0, 0], rep: [3.0, 2.4] }, // 背墙
-      { o: [-1.75, 0, -0.1], r: [0, Math.PI / 2, 0], rep: [2.0, 2.4] }, // 左
-      { o: [1.75, 0, -0.1], r: [0, Math.PI / 2, 0], rep: [2.0, 2.4] }, // 右
-      { o: [0, -1.3, -0.1], r: [-Math.PI / 2, 0, 0], rep: [3.0, 2.0] }, // 地
-      { o: [0, 1.3, -0.1], r: [Math.PI / 2, 0, 0], rep: [3.0, 2.0] }, // 顶
+      // T19b：网格加密（2.0×2.4 → 4.5×3.4 等）—— 删掉遗留紫环后笼子要**既是本拍的光源、
+      // 又要撑住 b) 的「边缘像素 ≥4%」（细网格本身贡献大量边缘），同时也更像"笼"
+      { o: [0, 0, -1.35], r: [0, 0, 0], rep: [5.6, 4.2] }, // 背墙
+      { o: [-1.75, 0, -0.1], r: [0, Math.PI / 2, 0], rep: [3.8, 4.2] }, // 左
+      { o: [1.75, 0, -0.1], r: [0, Math.PI / 2, 0], rep: [3.8, 4.2] }, // 右
+      { o: [0, -1.3, -0.1], r: [-Math.PI / 2, 0, 0], rep: [5.6, 3.8] }, // 地
+      { o: [0, 1.3, -0.1], r: [Math.PI / 2, 0, 0], rep: [5.6, 3.8] }, // 顶
     ]
     for (const w of wallSpec) {
       const tex = this.gridTex.clone()
@@ -813,12 +952,61 @@ export default {
     this.barTail = voxelField({ count: 1, cell: 0.11, gap: 0.02 })
     this.grp.add(this.barTail.object)
 
-    /* ---------- ⑧ 支撑结构的线框：立方体外的"交易环" ---------- */
-    this.ring = wireShape('torus', { size: 0.72, color: 0x9d7bff, radius: 0.008 })
-    this.grp.add(this.ring.object)
+    /* ---------- ⑧ 旧的"交易环"（紫色 torus）——**已删** ---------- */
+    // T19b 实测发现：T18a 声称把「旧画面（紫色半透明球体+方块+线框）」全删了，
+    // 但**只删了 render 里的整块更新代码**，`this.ring = wireShape('torus', …)` 的
+    // **对象创建还在**、且没有任何人再更新它 → 一个静止的紫色环（0x9d7bff、不透明度 0.95、
+    // 半径 0.72、位于世界原点）**在整段 E（59→74s）每一帧都画在画面正中**
+    // （实测 `E.ring.object.visible=true`、位置恒 (0,0,0)、缩放恒 1）。
+    // 这正是 §1.6 抱怨的「1:02 起**长期是同一个紫色画面**」的字面根因，
+    // 也直接违反同条的「同一主色（尤其紫色）连续出现 ≤3s」。
+    // 删掉创建 + 对应的 dispose 行；`wireShape` 的 import 也随之不再需要。
+
+    /* ---------- ⑧ 遗留的"交易环"（紫色 torus）——已删（§1.6「旧画面全部删除」） ---------- */
+    // T19b 实测：T18a 声称"把旧画面全删了"，但**只删了 render 里的整块更新代码**，
+    // `this.ring = wireShape('torus', …)` 的**对象创建还在**、且**没有任何人再更新它**
+    // → 一个静止的紫色环（0x9d7bff、不透明度 0.95、半径 0.72、世界原点）**在整段 E（59→74s）
+    // 每一帧都画在画面正中**（实测 `E.ring.object.visible=true`、位置恒 (0,0,0)、缩放恒 1）：
+    // 这正是 §1.6 抱怨的「1:02 起**长期是同一个紫色画面**」的字面根因，也直接违反同条的
+    // 「同一主色（尤其紫色）连续出现 ≤3s」。A/B 实测（把环隐藏 vs 显示、t=72.0 同一帧）：
+    // 整帧平均亮度 **0.1598 → 0.0381**（环一个人贡献 0.122）——所以删它必须**同时补光**：
+    // E5 已在本文件里用笼子自己补回（见 ⑥），**E1/E2 的补光与 §6 曝光链路另立一项**
+    // （§6 的 exposure 关键帧目前是**惰性的**：post3d 把 uniforms 写到了 `fxShader` 而不是
+    // ShaderPass 克隆出来的 `fx.uniforms` → 实测 `ctx.exposure=3.2` 时 `fx.uniforms.uExposure` 仍是 1）。
+
+    /* ---------- ④b 冲击波环（§1.6 E4「冲击波」） ---------- */
+    // T19b 实测确认的缺口：旧实现只有 ▶ 与白闪面，**没有冲击波**。
+    // 两圈环从 ▶ 中心向外炸开，半径扩到画面边缘之前就淡完 —— 避免擦过四角把
+    // §2.4 的「非闪白时刻四角平均亮度 ≤0.12」顶掉（T14b 就是这么被门环顶掉的）。
+    this.shocks = []
+    for (let i = 0; i < 2; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xff5a1e,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+        side: THREE.DoubleSide,
+      })
+      const m = new THREE.Mesh(new THREE.RingGeometry(0.5, 0.56, 72), mat)
+      m.frustumCulled = false
+      m.renderOrder = 28
+      m.visible = false
+      this.grp.add(m)
+      this.shocks.push(m)
+    }
+
+    // 相机坐标系摆位/投影用的暂存对象（每帧复用，不新建）
+    this._fwd = new THREE.Vector3()
+    this._right = new THREE.Vector3()
+    this._up = new THREE.Vector3()
+    this._ndc = new THREE.Vector3()
+    this._white = new THREE.Color(0xffffff)
 
     /* ---------- ⑨ 3D 数值读数（softmax / 交叉熵 / 注意力，全部真实计算） ---------- */
-    this.num = textPlane('…', { role: 'label', height: 0.055, weight: 500, family: 'code', color: '#9fe8ff' })
+    // T07b / FIX_V4 §2.3：面板类文字最小 34px。原来 height=0.055（≈30px），提到 0.063（≈34px）。
+    this.num = textPlane('…', { role: 'label', height: 0.063, weight: 500, family: 'code', color: '#9fe8ff' })
     this.num.mesh.position.set(-0.95, -0.92, 1.2)
     this.grp.add(this.num.mesh)
 
@@ -841,6 +1029,8 @@ export default {
     /* ================= 时间线：全部来自词锚点（§2.2） ================= */
     const TL = timeline(ctx.cues, 'E', {
       stimulation: [62.02, 0.3],
+      // T18b：`satisfaction` 锚点是本轮补的（歌词实测 65.70；见 anchors.js 的 E 段说明）
+      satisfaction: [65.7, 0.3],
       happy: [68.04, 0.35],
       execution: [69.41, 0.3],
       trapped: [71.24, 0.35],
@@ -867,50 +1057,72 @@ export default {
     const sinceSlam = ((t - tSlam0) % (beatGap * 4) + beatGap * 4) % (beatGap * 4)
     const beatKick = Math.exp(-sinceSlam * 6)
 
-    /* ================= ① 超立方体巨大化 + 旋转 + 相机绕拍 ================= */
-    // 进场：从段首（D→E 的桥接元素就是它）就位；stimulation 处"巨大化"用 inOutExpo 做预备+过冲。
-    const cubeIn = clamp(span(t, TL.stimulation.start - 1.5, 61.6))
-    const grow = inOutExpo(clamp(span(t, tStim - 0.25, tStim + 1.35)))
-    const pop = outBack(clamp(span(t, tStim, tStim + 0.5)))
-    const glow = 0.35 + 0.65 * ctx.sync.pulse(t, 260)
-    const breathe = 1 + 0.05 * Math.sin(t * 2.3) + 0.06 * glow
-    const cubeVis = cubeIn * (1 - span(t, 73.0, 73.95))
-    // 0.42 → 2.6：对比 59–62s 的小立方体，"巨大化"在同一段内看得见地发生
-    const cubeScale = (0.62 + 2.1 * grow) * (0.92 + 0.16 * pop) * breathe
-    this.cube.object.visible = cubeVis > 0.01
-    if (this.cube.object.visible) {
-      this.cube.update(t, {
-        alpha: cubeVis * (0.55 + 0.45 * glow),
-        spin: 0.6 + 0.9 * grow,
-        scale: cubeScale * (1 + 0.05 * beatKick),
-        color: mixHex('#7f5cc8', '#54e0ff', 0.28 + 0.55 * clamp(grow)),
+    /* ================= ① E1 stimulations：3D 神经网络 + 信号逐层传播 + 相机推进 ================= */
+    // ⚠️ T18a / FIX_V4 §1.6：**删除旧画面（紫色半透明球体 + 方块 + 线框）** ——
+    // 原来这一大块画的是"超立方体巨大化 + 反向自转外框 + 金色核心 + 环"（`this.cube/frame/core/ring`），
+    // 全部删除；E1 改成**神经网络**：4 层 20 节点、相邻层全连接 84 条线，
+    // 一个 `sweep` 值在 0..3 层之间推进（**信号脉冲逐层传播**），配色 **青 → 洋红**，
+    // "**相机推进**"用 z 从 0.9 推到 −0.6 + 缓慢放大实现。
+    const netIn = clamp(span(t, TL.stimulation.start - 1.2, tStim + 0.5))
+    // ⚠️ 这里**不能**写 `TL.satisfaction` —— 本段的 timeline 只声明了
+    // `stimulation / happy / execution / trapped / strange` 五个键，**没有 `satisfaction`**
+    // （§1.6 的 E2「satisfaction」词在 anchors.js 里没有锚点）。
+    // T18a 只负责 E1，所以窗口按 E1 自己的时长收：stimulation 后约 2.4s 淡出。
+    // E2 的边界留给 T18b（届时先补 `satisfaction` 锚点，再按锚点切拍）。
+    const netOut = 1 - clamp(span(t, tStim + 2.4, tStim + 3.1))
+    const netA = netIn * netOut
+    if (this.net) {
+      this.net.update(t, {
+        alpha: netA,
+        u: clamp(span(t, tStim - 0.3, tStim + 2.6)) * 1.4,
+        advance: clamp(span(t, tStim - 0.2, tStim + 2.6)),
       })
     }
-    // 外框：比立方体略大一点，反向自转，给"超立方体"一个可读的实体参照
-    this.frame.object.visible = cubeVis > 0.02
-    if (this.frame.object.visible) {
-      const fs = 0.62 + 1.05 * grow
-      this.frame.object.visible = true
-      this.frame.object.scale.setScalar(Math.max(0.001, fs * (1 + 0.06 * pop)))
-      this.frame.object.rotation.y = -t * (0.35 + 0.5 * grow)
-      this.frame.object.rotation.x = Math.sin(t * 0.42) * 0.4
-      this.frame.material.opacity = cubeVis * (0.32 + 0.5 * glow)
-      this.frame.material.color.set(mixHex('#8fd4ff', '#e0a6ff', 0.3 + 0.4 * clamp(grow)))
+
+    /* ================= ①b E2 satisfaction：金色奖励宝珠 ================= */
+    // §1.6 E2：「金色奖励宝珠**随每拍长大**并**射出光线**，相机**绕行**；**金→白**」。
+    // "随每拍长大"= 取窗口内**已经过的起音点数**当长大步数（真的跟着节拍，不是线性插值）。
+    const tSat = TL.satisfaction.t
+    const orbA = clamp(span(t, tSat - 1.0, tSat + 0.4)) * (1 - clamp(span(t, TL.happy.t - 0.5, TL.happy.t + 0.3)))
+    if (this.orb) {
+      let beats = 0
+      try {
+        beats = (ctx.sync.onsetsIn(tSat - 0.4, t) || []).length
+      } catch (e) {
+        beats = 0
+      }
+      // 每拍一个台阶（起音点计数）× 窗口内的单调增长
+      // —— 实测 E2 窗口（65.3–68.0）里只有 **2** 个起音点，若只按台阶会长得很"钝"；
+      //    叠一个 6% 的单调项后，"随每拍长大"仍然成立（台阶清楚），整体也更像"在长大"。
+      const growSpan = Math.max(0.4, TL.happy.t - tSat)
+      const radius = (0.14 + 0.055 * Math.min(beats, 8)) * (1 + 0.06 * clamp((t - tSat) / growSpan))
+      const white = clamp((t - tSat) / Math.max(0.4, TL.happy.t - tSat))
+      const cam = ctx.three.camera
+      this.orb.object.position.set(cam.position.x + 0.28 * Math.sin(t * 0.5), cam.position.y + 0.02, cam.position.z - 1.5)
+      this.orb.update(t, {
+        alpha: orbA,
+        radius: radius,
+        rayLen: 0.8 + 0.5 * Math.abs(Math.sin(t * 3.1)),
+        white: white,
+      })
+      this.metrics.orb = { a: +orbA.toFixed(2), beats: beats, r: +radius.toFixed(3), white: +white.toFixed(2) }
     }
-    this.core.visible = cubeVis > 0.02
-    if (this.core.visible) {
-      this.core.scale.setScalar(Math.max(0.001, 0.5 + 2.6 * grow) * (1 + 0.2 * glow))
-      this.core.rotation.y = t * 1.1
-      this.core.rotation.x = t * 0.7
-      this.coreMat.opacity = cubeVis * (0.35 + 0.5 * glow)
-    }
-    this.ring.object.visible = cubeVis > 0.02
-    if (this.ring.object.visible) {
-      this.ring.object.visible = true
-      this.ring.object.scale.setScalar(Math.max(0.001, 0.7 + 2.2 * grow))
-      this.ring.object.rotation.z = t * 0.28
-      this.ring.object.rotation.x = Math.PI / 2 + Math.sin(t * 0.3) * 0.35
-      this.ring.material.opacity = cubeVis * 0.4 * (0.4 + 0.6 * glow)
+
+    /* ================= T19a / §1.6 E3：暖色（happy 拍） ================= */
+    // 实测问题：E3 窗口（68.0–69.4）整帧平均 **r 0.245 < b 0.313**，是**冷蓝**的 ——
+    // 而 §1.6 明写 E3 要「**暖色**」（且要求"每拍的配色至少 2 项不同"）。
+    // 这里在暖色窗口里叠一层加法的暖橙，把它推成暖调（可测量：r > b），E4 的闪白之前淡出。
+    // ⚠️ 实测：第一版（从 `tHappy-0.3` 起、α=0.2）在**词落点 68.2** 仍测得 r 0.309 < b 0.314（勉强偏冷），
+    // 只有 69.0 才是暖的。所以把窗口**提前到 `tHappy-0.6`** 并把 α 提到 **0.28**，让整拍（含词落点）都是暖调。
+    const warmA = clamp(span(t, tHappy - 0.6, tHappy + 0.4)) * (1 - clamp(span(t, tExec - 0.4, tExec + 0.2)))
+    if (warmA > 0.01) {
+      const gw = ctx.g
+      gw.save()
+      gw.globalCompositeOperation = 'lighter'
+      gw.globalAlpha = 0.28 * warmA
+      gw.fillStyle = '#ff9a3c'
+      gw.fillRect(0, 0, ctx.W, ctx.H)
+      gw.restore()
     }
 
     /* ================= ② 彩色粒子迸发 ================= */
@@ -950,7 +1162,14 @@ export default {
     this.metrics.glyphPx = 0
     this.metrics.quads = 0
     let anyFormula = false
-    for (let k = 0; k < SLAM_FORMULAS.length; k++) {
+    // ⚠️ T18b / FIX_V4 §1.6：「画面里**不再出现超立方体与重复的公式砸入**」。
+    // 超立方体已在 T18a 删除；这里把**公式砸入整段停用**（`if (false)` 让下面的 for 永不执行），
+    // 之前已烘焙出来的条目也每帧强制隐藏，避免残影。
+    for (const s of this.slams) {
+      if (s.entry) s.entry.object.visible = false
+      if (s.label) s.label.mesh.visible = false
+    }
+    if (false) for (let k = 0; k < SLAM_FORMULAS.length; k++) {
       const t0 = tSlam0 + k * beatGap * 4
       const u = span(t, t0, t0 + 0.24)
       if (u <= 0 || t > t0 + SLAM_LIFE + 0.6) {
@@ -997,7 +1216,7 @@ export default {
       this.metrics.quads += entry.quads
       let lab = this.slams[k].label
       if (!lab) {
-        lab = textPlane(spec.label, { role: 'label', height: 0.055, weight: 700, family: 'code', color: '#ffd479' })
+        lab = textPlane(spec.label, { role: 'label', height: 0.063, weight: 700, family: 'code', color: '#ffd479' })
         this.grp.add(lab.mesh)
         this.slams[k].label = lab
       }
@@ -1007,39 +1226,132 @@ export default {
       lab.material.opacity = alpha
     }
 
-    /* ================= ④ 巨大 3D ▶ + ⑤ 3D 白闪 ================= */
+    /* ================= ④ 巨大 3D ▶ + 冲击波 + ⑤ 3D 白闪 ================= */
+    // §1.6 E4「巨大的 3D ▶ 砸入，冲击波，闪白；**红橙**」。T19b 实测查出的三处缺口：
+    //   ① 配色：▶ 本体是**青色**（face 0x9fe8ff / side 0x2b6f92），整帧 r 0.230 < b 0.303
+    //      （冷蓝）—— 与「红橙」完全相反；
+    //   ② 取景：旧写法用「世界 z = camZ − 0.95」当"在镜头前"，可相机在 x≈1.1 且朝原点看，
+    //      于是 ▶ 被摆到 NDC x ≈ −1.36…−1.47 —— **整拍都在画面外**（实测 69.41/70.4 都看不到它）；
+    //   ③ 冲击波：不存在。
+    // 现在：位置改成**相机坐标系**（前向 1.62→1.07 砸进来）、配色红橙（白热时冲白）、
+    // 并补上 ④b 的两圈冲击波。
     const pu = clamp(span(t, TL.execution.start, tExec + 0.5))
     const playFade = 1 - span(t, tExec + 1.35, tExec + 1.75)
     const playA = pu > 0 ? clamp(Math.min(1, pu * 3) * playFade) : 0
     this.play.visible = playA > 0.01
     if (this.play.visible) {
       // 弹性入场（§0.6 的过冲）：outElastic 先把 ▶ 弹大再收住
-      const s = 0.55 + 0.45 * outElastic(clamp(pu))
-      this.play.scale.setScalar(Math.max(0.001, s))
-      // 放在立方体之前（z 更大）——▶ 是"播放按钮"，必须压在最前面
-      const px = -0.55 - 0.18 * clamp(span(t, tHappy, tExec))
-      this.play.position.set(px, 0.03 + (1 - outCubic(clamp(pu))) * -0.4, camZ - 0.95)
-      this.play.rotation.y = -0.2 + 0.12 * Math.sin(t * 0.8)
+      const pop = outElastic(clamp(pu))
+      const cam = ctx.three.camera
+      this._fwd.set(0, 0, -1).applyQuaternion(cam.quaternion)
+      this._right.set(1, 0, 0).applyQuaternion(cam.quaternion)
+      this._up.set(0, 1, 0).applyQuaternion(cam.quaternion)
+      const dist = 1.62 - 0.55 * outCubic(clamp(pu))
+      this.play.position.copy(cam.position).addScaledVector(this._fwd, dist)
+      this.play.position.addScaledVector(this._right, 0.05 * Math.sin(t * 0.7))
+      this.play.position.addScaledVector(this._up, 0.03)
+      // 尺寸：几何本身 0.62×1.35 世界单位，在 dist≈1.07 处 0.38→0.54 的缩放
+      // 约占屏高 65%→92%（"巨大"且仍读得出是个 ▶）
+      this.play.scale.setScalar(Math.max(0.001, 0.38 + 0.16 * pop))
+      this.play.rotation.y = -0.18 + 0.14 * Math.sin(t * 0.8)
       this.play.rotation.z = Math.sin(t * 0.55) * 0.05
-      // 白热：起手 0.12s 全白 → 回到青色描边
+      // 白热：起手 0.12s 全白 → 回到**红橙**
       const hot = Math.exp(-Math.pow(pu * 9, 2))
-      this.playFace.color.set(0x9fe8ff).lerp(new THREE.Color(0xffffff), hot)
-      this.playSide.color.set(0x2b6f92).lerp(new THREE.Color(0xffffff), hot * 0.8)
+      this.playFace.color.set(0xff5a1e).lerp(this._white, hot)
+      this.playSide.color.set(0x8a2b06).lerp(this._white, hot * 0.8)
       this.playFace.opacity = playA * (0.75 + 0.25 * Math.sin(t * 6.1) ** 2)
       this.playSide.opacity = playA * 0.85
     }
+
+    /* ---------- ④b 两圈冲击波：从 ▶ 中心炸开 ---------- */
+    for (let i = 0; i < this.shocks.length; i++) {
+      const sh = this.shocks[i]
+      const u = clamp(span(t, tExec + i * 0.13, tExec + 0.5 + i * 0.13))
+      const on = u > 0 && u < 1
+      sh.visible = on
+      if (!on) continue
+      sh.position.copy(this.play.position)
+      sh.scale.setScalar(0.2 + 1.15 * outCubic(u))
+      sh.material.opacity = 0.75 * (1 - u) ** 1.6
+      sh.material.color.set(0xff5a1e).lerp(this._white, clamp(u * 1.4))
+    }
+
+    /* ---------- ④c §1.6 E4「红橙」：以 ▶ 为中心的红橙加法辉光 ---------- */
+    // 实测缺口：E4 拍整帧 **r 0.230 < b 0.303（冷蓝）**，与「红橙」相反 ——
+    // ▶ 与冲击波只占中央一小块，压不过整屏冷色底子。这里叠一层**红橙径向辉光**：
+    // 中心强、边缘到四角归零（`R = max(W,H)*0.62`，四角在 R 之外 ⇒ 对四角亮度几乎无贡献，
+    // 不会把 §2.4 的 v) ≤0.12 顶掉）。窗口从 `tExec+0.12` 起，与 T19a 的 E3 暖橙
+    // （在 `tExec-0.4 → +0.2` 之间淡出）**错开**，避免两层暖色同时叠满。
+    const e4A = clamp(span(t, tExec + 0.12, tExec + 0.45)) * (1 - clamp(span(t, tTrap - 0.55, tTrap - 0.25)))
+    if (e4A > 0.01 && this.play.visible) {
+      const g4 = ctx.g
+      this._ndc.copy(this.play.position).project(ctx.three.camera)
+      const sx = (this._ndc.x * 0.5 + 0.5) * ctx.W
+      const sy = (-this._ndc.y * 0.5 + 0.5) * ctx.H
+      const R = Math.max(ctx.W, ctx.H) * 0.62
+      const grad = g4.createRadialGradient(sx, sy, 0, sx, sy, R)
+      grad.addColorStop(0, 'rgba(255,96,30,0.46)')
+      grad.addColorStop(0.55, 'rgba(255,58,18,0.30)')
+      grad.addColorStop(1, 'rgba(255,40,10,0)')
+      g4.save()
+      g4.globalCompositeOperation = 'lighter'
+      g4.globalAlpha = e4A
+      g4.fillStyle = grad
+      g4.fillRect(0, 0, ctx.W, ctx.H)
+      g4.restore()
+    }
+
+    /* ---------- ④d §1.6 E5「冷蓝」：笼内的冷蓝辉光（补回被删紫环的光） ---------- */
+    // T19b：遗留紫环一个人就给整帧贡献 0.122 的平均亮度（A/B 实测 0.1598 → 0.0381）。
+    // 环按 §1.6 必须删，所以这一拍的光要**由本拍自己的对象**给回来 ——
+    // 笼子是冷青网格（「冷蓝」的正确色相），再加一层**以画面中心为心的冷蓝径向辉光**
+    // （中心强、四角归零 ⇒ §2.4 的四角 ≤0.12 不受影响）。
+    // 窗口 `tTrap-0.2 → 74.0` = 2.96s ≤3s（§1.6「同一主色连续 ≤3s」），
+    // 且与 E4 的红橙辉光（`tTrap-0.25` 收）不重叠。
+    const e5A = clamp(span(t, tTrap - 0.2, tTrap + 0.25)) * (1 - clamp(span(t, 73.7, 74.0)))
+    if (e5A > 0.01) {
+      const g5 = ctx.g
+      const R5 = Math.max(ctx.W, ctx.H) * 0.62
+      const grad5 = g5.createRadialGradient(ctx.W * 0.5, ctx.H * 0.5, 0, ctx.W * 0.5, ctx.H * 0.5, R5)
+      grad5.addColorStop(0, 'rgba(96,205,255,0.26)')
+      grad5.addColorStop(0.55, 'rgba(58,150,255,0.16)')
+      grad5.addColorStop(1, 'rgba(40,120,255,0)')
+      g5.save()
+      g5.globalCompositeOperation = 'lighter'
+      g5.globalAlpha = e5A
+      g5.fillStyle = grad5
+      g5.fillRect(0, 0, ctx.W, ctx.H)
+      g5.restore()
+    }
+
     // 闪白：既走 fx（后处理全屏闪白），也放一片 3D 面 —— §3 E 要的是"亮起并闪白"，
     // 3D 的那一片贴在 ▶ 后面，闪的瞬间连几何一起被冲掉，比纯 2D 全屏白更有"体积"。
-    const fl = Math.exp(-Math.pow((t - tExec) * 7, 2)) + 0.6 * Math.exp(-Math.pow((t - tExec - 0.22) * 9, 2))
+    // ⚠️ T19b 修（第二处）：原来的第二峰（tExec+0.22、σ=1/9）把 3D 闪面拖到 **t=69.7 仍剩 0.36
+    // 不透明度**，而 `fx.flash(69.7)=0`（声明的闪白 dur 0.26 在 69.67 就结束）→ 69.7
+    // **不是闪白豁免时刻**，四角实测 **0.2009 ≫ 0.12**（§2.4 的 v) 会记一笔）。
+    // 第一峰同样有 0.11s 的"提前量"：t=69.3 时闪面已有 0.47 不透明度、四角 **0.2676**，
+    // 而此刻 `fx.flash=0`（声明的闪白 69.41 才起、且 atk 0.012）。
+    // 现在给闪面加一道**双向硬窗口**（69.42 起、69.68 止），让它严格落在声明闪白的豁免窗口内 ——
+    // 于是"闪面亮着"的时刻一定满足 `fx.flash(t) > 0.02`，v) 不会再被这一片误伤。
+    const flashEnv =
+      clamp(span(t, tExec + 0.012, tExec + 0.06)) * (1 - clamp(span(t, tExec + 0.16, tExec + 0.27)))
+    const fl =
+      (Math.exp(-Math.pow((t - tExec) * 7, 2)) + 0.6 * Math.exp(-Math.pow((t - tExec - 0.17) * 11, 2))) * flashEnv
     this.flash.visible = fl > 0.02
     if (this.flash.visible) {
       this.flash.material.opacity = clamp(fl) * 0.85
-      this.flash.position.set(this.play.position.x, this.play.position.y, camZ - 0.8)
+      this.flash.position.copy(this.play.position)
     }
 
-    /* ================= ⑥ 透视网格墙合拢成玻璃笼 ================= */
+    /* ================= ⑥ 透视网格墙合拢成玻璃笼（相机在笼内） ================= */
     // 桥接 E→F：合拢的玻璃笼变成展示柜（§2.1 桥接表），所以笼必须在段末保持闭合，
     // 由段 F 接着用；这里只负责"从四周合拢"这一段动作。
+    // ⚠️ T19b 修：§1.6 E5 要「**相机在笼内**」，而旧实现的五片墙是**绝对世界坐标**
+    // （背墙 z=−1.35、左右 x=±1.75、地/顶 y=∓1.3），此时相机实测在 (0.67,0.05,3.27) ——
+    // 相机在笼**外** 1.6 个单位（实测 71.24–73.9 都只看得到"笼在远处合拢"）。
+    // 现在把整座笼**随相机平移**（基准位 = 相机位置 + 原相对偏移）：
+    // 笼的包围盒变成 x∈cam±1.75、y∈cam±1.3、z∈[cam−1.9, cam+1.7]，
+    // 相机恒在笼心 ⇒ 「相机在笼内」成立（四壁与地/顶把视野围住，背墙在正前方 1.35）。
     const closeU = clamp(span(t, TL.trapped.start, tStrange + 0.55))
     const wallA = clamp(span(t, tTrap - 0.45, tTrap + 0.25)) * (1 - span(t, 73.9, 74.0))
     for (let i = 0; i < this.walls.length; i++) {
@@ -1050,16 +1362,20 @@ export default {
       const b = w.userData.base
       // 合拢：从"相机侧的外围"滑到基准位；用 smoothstep 而不是线性（§0.6）
       const k = 1 - smoothstep(closeU)
-      // 起点 = 基准位 + 沿"从相机指向该墙"的方向再外推一段（于是看起来是从四周收进来的）
-      const dx = b[0] - camX * 0.22
-      const dy = b[1] - camY * 0.22
-      const dz = b[2] - camZ * 0.2
+      // 基准位 = 相机位置 + 构造时的相对偏移（于是笼心恒在相机上）
+      const bx = camX + b[0]
+      const by = camY + b[1]
+      const bz = camZ + b[2]
+      const dx = bx - camX * 0.22
+      const dy = by - camY * 0.22
+      const dz = bz - camZ * 0.2
       const L = Math.hypot(dx, dy, dz) || 1
-      w.position.set(b[0] + (dx / L) * 1.5 * k, b[1] + (dy / L) * 1.5 * k, b[2] + (dz / L) * 1.5 * k)
+      w.position.set(bx + (dx / L) * 1.5 * k, by + (dy / L) * 1.5 * k, bz + (dz / L) * 1.5 * k)
       // 朝向固定（不随合拢变化）：面片在自己的法向上平移，所以旋转保持构造时的值即可
       w.rotation.set(w.userData.rot[0], w.userData.rot[1], w.userData.rot[2])
       const pulse = ctx.sync.pulse(t, 200)
-      w.material.opacity = wallA * (0.3 + 0.35 * pulse + 0.25 * closeU)
+      // T19b：删掉遗留紫环后笼子要自己照亮这一拍 —— 基准不透明度 0.30→0.42、闭合项 0.25→0.33（上限仍夹在 1.0）
+      w.material.opacity = Math.min(1, wallA * (0.52 + 0.3 * pulse + 0.33 * closeU))
       w.userData.tex.offset.x = 0.02 * t * (i % 2 ? -1 : 1)
       w.userData.tex.offset.y = 0.012 * t
     }
@@ -1164,7 +1480,7 @@ export default {
     if (this.burst) this.burst.dispose()
     if (this.num) this.num.dispose()
     if (this.gridTex) this.gridTex.dispose()
-    if (this.ring && this.ring.material) this.ring.material.dispose()
+    if (this.shocks) for (const sh of this.shocks) { sh.geometry.dispose(); sh.material.dispose() }
     if (this.frame && this.frame.material) this.frame.material.dispose()
   },
 }

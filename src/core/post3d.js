@@ -161,14 +161,22 @@ export async function createPost3D(renderer, scene, camera, { width, height, cam
     bloom,
     fx,
     render(t, p = {}) {
-      fxShader.uniforms.uTime.value = t
-      fxShader.uniforms.uDispersion.value = p.dispersion ?? 0
-      fxShader.uniforms.uGlitch.value = p.glitch ?? 0
-      fxShader.uniforms.uRadial.value = p.radial ?? 0
-      fxShader.uniforms.uVignette.value = p.vignette ?? 0.35
-      fxShader.uniforms.uAberr.value = p.aberration ?? 0
-      fxShader.uniforms.uScan.value = p.scan ?? 0.25
-      fxShader.uniforms.uExposure.value = p.exposure ?? 1.0
+      // ⚠️ T19c 修（真 bug，影响全片）：这里原来写的是 `fxShader.uniforms.*`，但 `ShaderPass`
+      // 对**普通 shader 对象**会 `UniformsUtils.clone(shader.uniforms)` 再拿克隆去建材质
+      // —— 所以写源对象**一个字都到不了 GPU**。实测（T19b）：t=72 时 `ctx.exposure=3.2`
+      // 而 `fx.uniforms.uExposure` 仍是构造默认值 **1**；t=69.42 时 `fx.glitch(t)=0.292`
+      // 而 `uGlitch` 仍是 **0** ⇒ **§6 的 exposure 关键帧全表 + 逐帧 glitch/dispersion/
+      // aberration/scan/vignette/radial 一直是惰性的**（画面只有构造默认：vignette 0.35 /
+      // scan 0.25 / 其余 0 / exposure 1.0）。改成写 `fx.uniforms`（= 材质真正用的那一份）。
+      const u = fx.uniforms
+      u.uTime.value = t
+      u.uDispersion.value = p.dispersion ?? 0
+      u.uGlitch.value = p.glitch ?? 0
+      u.uRadial.value = p.radial ?? 0
+      u.uVignette.value = p.vignette ?? 0.35
+      u.uAberr.value = p.aberration ?? 0
+      u.uScan.value = p.scan ?? 0.25
+      u.uExposure.value = p.exposure ?? 1.0
       bloom.strength = p.bloom ?? 0.42
       bloom.radius = p.bloomRadius ?? 0.65
       composer.render()

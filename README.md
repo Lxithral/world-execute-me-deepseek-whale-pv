@@ -63,6 +63,16 @@ git clone --depth 1 https://github.com/MisakaZentai/world-execute-me-dsh-pv refs
   d) 每句歌词在 `[t0, hold]` 内被绘制、中英包围盒在画面内且互不重叠；
   e) 无音频降级运行不报错；f) `window.__errors` 为空。
 
+### 验收（全量）
+
+- `npm run doctor`（构建 / 语法 / 浏览器 import / 编码 / `__errors`）+ `?selftest&scan=0.5` 全片扫描（425 帧）。
+  **最近一次全量结果与逐项口径见 [`docs/PERF.md`](docs/PERF.md)**；修复过程中的每个缺陷都有
+  `docs/REVIEW_*.md` 记录（症状 → 实测 → 根因 → 修法 → 复测）。
+- ⚠️ **性能数字必须来自真实 GPU**：本仓的开发环境是无 GPU 的无头 Chrome（SwiftShader 软件光栅化），
+  `?perf` 的 p50/p95 在软件渲染下没有参考价值。请在本机浏览器里打开 `?perf` 取数。
+- ⚠️ `node tools/selftest.mjs "<url>/?selftest&scan=0.5"` 要比页面内直接点跑更稳
+  （页面内的自检在软件渲染下可能被自身的超时截断）。
+
 ### 操作
 
 - 点击画面开始播放；空格播放/暂停；`←` `→` 前后 5s（Shift 1s）；`f` 全屏。
@@ -91,7 +101,9 @@ src/scenes/  index.js + a_boot … n_handoff（与 DIRECTOR 的段 A–N 一一�
 
 - **唯一时钟** `t = audio.currentTime + syncOffset`；无音频时降级为内置计时器，不黑屏。
 - **纯函数渲染**：任意一帧 = `f(t)`。渲染路径不使用 `Math.random` / `Date.now` / `performance.now`，
-  随机一律 `hash(seed, index)`；暂停、拖动、乱序跳转后画面与顺序播放一致（`?selftest` a 项验证）。
+  随机一律 `hash(seed, index)`；**也不做任何"每次调用累加"的状态**（贴图 offset、相位、计数器都必须是
+  `t` 的闭式——T23a 修过一次真实的反例：段 K 峡谷的滚动贴图是 `offset.y -= 一格`，同一个 `t` 连渲两次
+  画面差约 40 万像素）；暂停、拖动、乱序跳转后画面与顺序播放一致（`?selftest` a 项验证）。
 - **有状态模拟**（梯度下降小球、损失曲线、KV cache 回收）在 init 阶段按固定步长离线积分成表，
   渲染时按 t 查表插值；GPU 粒子用解析公式 + `uTime` 在着色器里算位置。
 - **节拍/频谱**只读 `public/data/analysis.json`（onsets/beats/分段 tempo/RMS/64 频带 mel），

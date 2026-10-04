@@ -142,6 +142,9 @@ export default {
     this.grp.add(this.caret)
 
     this.metrics = { tris: 0 }
+    /* ---- T15 / §1.1：电源线（折线 + 电流脉冲 + 3D 插头 + 火花）---- */
+    this.cord = buildPowerCord()
+    this.grp.add(this.cord.object)
   },
 
   render(t, lt, ctx) {
@@ -152,6 +155,24 @@ export default {
 
     /* ================= 时间线（全部走词锚点） ================= */
     const tPower = cue('power', 0.32)
+    // T15 / §1.1：`protection`（歌词 `Remember to put on protection`，本轮补的锚点）
+    const tProtect = cue('protection', 2.1)
+    // ⚠️ 这里必须**自己再取一次** `pieces`：这个块的物理位置在外层 `const tPieces` **之前**，
+    // 直接引用它会 `Cannot access 'tPieces' before initialization`（TDZ）→ 段 A 每帧抛错。
+    const tPiecesA = cue('pieces', 4.9)
+    /* ---- T15 / §1.1：电源线那一拍 ----
+     * 折线从左缘伸进来（u 0→1 约 0.9s），插头在末段与插座对接（≈u 0.92）→ 火花迸发。 */
+    if (this.cord) {
+      const u = clamp(span(t, tPower - 0.15, tPower + 0.95))
+      const alpha = clamp(span(t, tPower - 0.15, tPower + 0.2)) * (1 - span(t, tPiecesA - 0.2, tPiecesA + 0.45))
+      const spark = span(t, tPower + 0.72, tPower + 0.88) * (1 - span(t, tPower + 1.25, tPower + 1.6))
+      this.cord.update(t, { u: u, alpha: alpha, spark: spark })
+    }
+    // 巨大的电源符号（直径 0.34H ≥0.30H）与 protection 的盾牌/锁
+    // ⚠️ 必须用 `ctx.g`：这一段在 render 里位于局部 `const g` **之前**，直接用 `g` 会
+    // `Cannot access 'g' before initialization`（TDZ）。
+    drawPowerSymbol(ctx.g, ctx, t, clamp(span(t, tPower, tPower + 0.35)) * (1 - span(t, tPower + 1.5, tPower + 2.0)))
+    drawProtection(ctx.g, ctx, t, clamp(span(t, tProtect, tProtect + 0.35)) * (1 - span(t, tPiecesA - 0.2, tPiecesA + 0.3)))
     const tPieces = cue('pieces', 4.9)
     const tObject = cue('object', 6.44)
     const tParams = cue('parameters', tObject + 1.3)
@@ -296,4 +317,153 @@ export default {
   dispose() {
     if (this.title) this.title.dispose()
   },
+}
+
+/* ================================================================== *
+ * T15 / FIX_V4 §1.1：`Switch on the power line` 那一拍
+ * ------------------------------------------------------------------
+ *   · 「一条**粗发光折线从画面左缘伸入，途经晶格格点**」→ 4 点折线 + TubeGeometry
+ *   · 「**电流脉冲（亮点+拖尾）沿线奔跑**」→ 亮球 + 3 段递减拖尾，沿 `curve.getPointAt(u)` 跑
+ *   · 「末端是 **3D 电源插头**，与插座对接的瞬间**火花迸发**」→ 插头（体+两脚）+ 插座 + 火花 Points
+ *   · 「同一时刻画面中央用发光管描出**巨大的电源符号**（圆环缺口+竖线），高度 ≥ 画面高度 30%」
+ *     → `drawPowerSymbol()`：直径 0.34H（≥0.30H）
+ *   · 其余概念：`pieces`/`object`/`parameters`/`init`/`new world`/`simulation` 早有；
+ *     本轮补齐 §1.1 点名的 `protection` = **盾牌 + 锁描边**，并给它补上缺失的锚点。
+ * ================================================================== */
+
+function buildPowerCord() {
+  const grp = new THREE.Group()
+  grp.name = 'a:cord'
+  // 折线：从左缘（画外）伸入，经过两个晶格格点附近，末端在中心左侧
+  const pts = [
+    new THREE.Vector3(-3.4, 0.42, 0.15),
+    new THREE.Vector3(-2.05, 0.1, 0.1),
+    new THREE.Vector3(-1.05, -0.2, 0.05),
+    new THREE.Vector3(-0.22, 0.02, 0.0),
+  ]
+  const curve = new THREE.CatmullRomCurve3(pts)
+  const tubeMat = new THREE.MeshBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false })
+  const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 96, 0.024, 8, false), tubeMat)
+  grp.add(tube)
+  // 电流脉冲：亮点 + 3 段拖尾
+  const pulseMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false })
+  const pulse = new THREE.Mesh(new THREE.SphereGeometry(0.038, 12, 10), pulseMat)
+  grp.add(pulse)
+  const tail = []
+  for (let i = 0; i < 3; i++) {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.03 - i * 0.007, 10, 8), pulseMat.clone())
+    grp.add(m)
+    tail.push(m)
+  }
+  // 3D 插头（体 + 两脚）+ 插座
+  const plug = new THREE.Group()
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.2), new THREE.MeshStandardMaterial({ color: 0xdfefff, roughness: 0.4, metalness: 0.3 }))
+  plug.add(body)
+  for (const s of [-1, 1]) {
+    const prong = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.026, 0.12), new THREE.MeshStandardMaterial({ color: 0xffd479, metalness: 0.8, roughness: 0.25 }))
+    prong.position.set(s * 0.045, 0, 0.15)
+    plug.add(prong)
+  }
+  grp.add(plug)
+  const socketAt = pts[3].clone().add(new THREE.Vector3(0, 0, 0.22))
+  const socket = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.26, 0.08), new THREE.MeshStandardMaterial({ color: 0x2a3546, roughness: 0.6, metalness: 0.4 }))
+  socket.position.copy(socketAt)
+  grp.add(socket)
+  // 火花（对接瞬间迸发）
+  const SN = 90
+  const sGeo = new THREE.BufferGeometry()
+  sGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(SN * 3), 3))
+  const sparks = new THREE.Points(
+    sGeo,
+    new THREE.PointsMaterial({ color: 0xffe6a8, size: 0.03, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true })
+  )
+  grp.add(sparks)
+  const plugged = socketAt.clone().add(new THREE.Vector3(0, 0, -0.13))
+  return {
+    object: grp,
+    update(t, o = {}) {
+      const u = clamp(o.u == null ? 0 : o.u)
+      const alpha = o.alpha == null ? 1 : o.alpha
+      const spark = o.spark == null ? 0 : o.spark
+      grp.visible = alpha > 0.01
+      if (!grp.visible) return
+      tubeMat.opacity = 0.95 * alpha
+      const pk = clamp((u - 0.18) / 0.82)
+      const toSock = pk > 0.92
+      const head = curve.getPointAt(pk)
+      plug.position.copy(toSock ? plugged : head)
+      plug.rotation.y = (1 - pk) * 0.9
+      body.material.opacity = alpha
+      pulse.position.copy(plug.position)
+      pulseMat.opacity = alpha * (0.6 + 0.4 * Math.sin(t * 22))
+      for (let i = 0; i < tail.length; i++) {
+        tail[i].position.copy(toSock ? plugged : curve.getPointAt(Math.max(0, pk - (i + 1) * 0.05)))
+        tail[i].material.opacity = alpha * (0.45 - i * 0.12)
+      }
+      sparks.material.opacity = spark * 0.95
+      const arr = sGeo.attributes.position.array
+      for (let i = 0; i < SN; i++) {
+        const a2 = hash01(i, 611) * Math.PI * 2
+        const el = (hash01(i, 612) - 0.5) * 2
+        const r = spark * (0.08 + hash01(i, 613) * 0.42)
+        arr[i * 3] = socketAt.x + Math.cos(a2) * Math.cos(el) * r
+        arr[i * 3 + 1] = socketAt.y + Math.sin(el) * r
+        arr[i * 3 + 2] = socketAt.z + Math.sin(a2) * Math.cos(el) * r * 0.7
+      }
+      sGeo.attributes.position.needsUpdate = true
+    },
+  }
+}
+
+/** §1.1：画面中央的巨大电源符号（圆环缺口 + 竖线），直径 0.34H ≥ 0.30H */
+function drawPowerSymbol(g, ctx, t, a) {
+  if (a <= 0.01) return
+  const { W, H } = ctx
+  const R = H * 0.17
+  const cx = W / 2
+  const cy = H * 0.44
+  g.save()
+  g.globalAlpha = a
+  g.strokeStyle = rgba(C.cyan, 0.95)
+  g.shadowColor = rgba(C.cyan, 0.9)
+  g.shadowBlur = 26
+  g.lineWidth = Math.max(4, H * 0.006)
+  g.lineCap = 'round'
+  g.beginPath()
+  g.arc(cx, cy, R, -Math.PI / 2 + 0.42, -Math.PI / 2 - 0.42 + Math.PI * 2)
+  g.stroke()
+  g.beginPath()
+  g.moveTo(cx, cy - R * 1.06)
+  g.lineTo(cx, cy - R * 0.34)
+  g.stroke()
+  g.restore()
+}
+
+/** §1.1：`protection` = 盾牌 + 锁描边 */
+function drawProtection(g, ctx, t, a) {
+  if (a <= 0.01) return
+  const { W, H } = ctx
+  const cx = W * 0.5
+  const cy = H * 0.44
+  const R = H * 0.14
+  g.save()
+  g.globalAlpha = a
+  g.strokeStyle = rgba(C.cyan, 0.9)
+  g.shadowColor = rgba(C.cyan, 0.8)
+  g.shadowBlur = 22
+  g.lineWidth = Math.max(3, H * 0.005)
+  g.beginPath()
+  g.moveTo(cx, cy - R * 1.15)
+  g.lineTo(cx + R * 0.92, cy - R * 0.55)
+  g.lineTo(cx + R * 0.78, cy + R * 0.55)
+  g.lineTo(cx, cy + R * 1.15)
+  g.lineTo(cx - R * 0.78, cy + R * 0.55)
+  g.lineTo(cx - R * 0.92, cy - R * 0.55)
+  g.closePath()
+  g.stroke()
+  g.strokeRect(cx - R * 0.3, cy - R * 0.02, R * 0.6, R * 0.48)
+  g.beginPath()
+  g.arc(cx, cy - R * 0.02, R * 0.21, Math.PI, 0)
+  g.stroke()
+  g.restore()
 }

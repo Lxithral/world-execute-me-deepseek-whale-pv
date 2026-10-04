@@ -6,10 +6,9 @@
 //     --expr "window.__app.SCENES.find(s=>s.demo).wall.panels[0].texture.image" --out .tmp/panel0.png
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { killTree } from './kill_tree.mjs'
 
 const CHROME = [
@@ -32,14 +31,15 @@ if (!url || !expr) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const port = 10100 + Math.floor(Math.random() * 300)
-const profile = join(tmpdir(), 'dshpv-cp-' + randomBytes(4).toString('hex'))
+// ✅ T24：复用同一个 user-data-dir，且不在本进程里删（见 tools/shoot.mjs 的说明）
+const profile = join(tmpdir(), 'dshpv-chrome')
 mkdirSync(profile, { recursive: true })
 const child = spawn(CHROME, [
   '--headless=new', '--disable-gpu', '--enable-unsafe-swiftshader', '--use-angle=swiftshader',
   '--no-first-run', '--mute-audio', '--window-size=1280,720',
   `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank',
 ], { stdio: 'ignore' })
-const cleanup = () => { killTree(child); try { rmSync(profile, { recursive: true, force: true }) } catch (e) {} }
+const cleanup = () => { killTree(child) }
 
 async function main() {
   let list = null
@@ -53,7 +53,9 @@ async function main() {
   const pending = new Map()
   ws.addEventListener('message', (ev) => {
     const m = JSON.parse(ev.data)
-    if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(new Error(m.error.message)) : p.res(m.result) }
+    // ⚠️ T24 顺手修：原来写 `p.rej(...)`/`p.res(...)`，而 `pending.set` 存的是 `{ resolve, reject }`
+    // → 一收到回包就抛 `p.res is not a function`（这个探针此前也跑不通）。
+    if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result) }
   })
   const send = (method, params = {}) => new Promise((res, rej) => { const i = ++id; pending.set(i, { resolve: res, reject: rej }); ws.send(JSON.stringify({ id: i, method, params })) })
   const evaluate = async (e) => {
