@@ -8,7 +8,7 @@
 import { C, rgba } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic, inOutCubic, outElastic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
-import { MONO, panel, handoffCard, nestedWindow, bootLog, roundRect, ctxAt } from '../ui/dsh.js'
+import { MONO, panel, handoffCard, nestedWindow, bootLog, ctxAt } from '../ui/dsh.js'
 import { typed, cursorOn } from '../ui/typing.js'
 import * as THREE from 'three'
 import { createHeartParticles, screenFracToWorldX } from '../lib/heart3d.js'
@@ -79,16 +79,36 @@ export default {
       const dist = 3.0
       const hx = screenFracToWorldX(cam, 0.5, dist)
       this.heart.object.position.set(cam.position.x + hx, cam.position.y - 0.02, cam.position.z - dist)
+      // T53 / FIX_V5 §N 3:26：「最后一句歌词(205.964)出现时，3D 爱心的偏航角必须恰好正对镜头
+      // （yaw 在该时刻 ≡ 0 mod 2π），此前匀速自转、不得突然停转」。
+      // `heart3d.update()` 内部是 `grp.rotation.y = t * spin`（从 t=0 起恒定角速度）⇒ 取
+      //   spin = 7·2π / 205.964 = 0.213561 rad/s
+      // 就能让 205.964s 恰好落在**第 7 整圈**上（yaw ≡ 0，与段 M 的 0.22 只差 2.9%，看不出变慢，
+      // 且全程角速度恒定、不存在"到点刹停"）。
+      const T_LAST = 205.964
+      const HEART_SPIN = (TAU * 7) / T_LAST
       this.heart.update(t, {
         // 冻结帧（206.0 起）按 DIRECTOR 要回到"段 A 开机构图"，那时不显示爱心
         alpha: freeze < 0.5 ? heartA : 0,
         beat: beatPulse,
         s: 0.9 + 0.1 * heartA,
-        spin: 0.22,
+        spin: HEART_SPIN,
       })
       this.metrics = this.metrics || {}
       this.metrics.heartPoints = 22000
       this.metrics.heartBeat = +beatPulse.toFixed(2)
+      this.metrics.heartSpin = +HEART_SPIN.toFixed(6)
+      // 自检用原始角速度：上面那个是 6 位小数的展示值，拿它做 1e-6 级比值会吃进 5e-7 舍入误差。
+      this.metrics.heartSpinExact = HEART_SPIN
+      // 验证用：到「0 mod 2π」的距离（§3 自检口径 = <0.05rad）
+      const yawGap = (v) => {
+        const r = ((v % TAU) + TAU) % TAU
+        return +Math.min(r, TAU - r).toFixed(5)
+      }
+      this.metrics.heartYawGap = yawGap(t * HEART_SPIN)
+      this.metrics.heartYawGapAtLast = yawGap(T_LAST * HEART_SPIN)
+      // FIX_V5 §3 新增自检（T55）：yaw 绝对值（**不 toFixed**，1e-6 级角速度判据会被舍入吃掉）。
+      this.metrics.heartYaw = t * HEART_SPIN
     }
 
     // ---- 3:10.8 交接卡片 ----
@@ -99,19 +119,29 @@ export default {
     // 现在：卡片 190.8 起、**193.2 淡完**；旧窗口**延到 193.6** 才淡入 —— 中间留 0.4s 空档。
     const cardA = span(t, tHandoff, tHandoff + 0.6) * (1 - span(t, tHandoff + 2.0, tHandoff + 2.4))
     if (cardA > 0.01) {
-      // T09 / §1.15：交接卡片**放大成终端形态** ——
-      // 左侧带 x = 3%W（x∈[3%,34%]）、高 0.42H = 454px（≥ 38%H = 410）、
-      // 文字 36px（≥36）、5 行（≤5）、逐行 + 行内逐字键入。
+      // T53 / FIX_V5 §N 3:11：「左侧窗口过大：按 G1 自适应缩小，文字以窗口内可读为准」。
+      // 旧版是固定 595×454 窗口配 5 行 36px 文字 —— 窗口远大于内容（正文只占上半、下方大片空白），
+      // 且正文左缘落在 x=76px < 5%W=96px，是**全片 gscan 最早的 g5 越界点**（190.9–193.1）。
+      // 现在：窗口 = 内容 + 24px 内边距（G1），宽度随最长行自适应（595→450），无空白；
+      // 同时满足 FIX_V4 §1.15 对这张卡片的三条数字要求（V5 未废止它们，只是要求「按 G1 自适应」）：
+      //   文字 ≥36px ⇒ 取 40px（G1 区间上限）；≤5 行 ⇒ 5 行；x∈[3%,34%] ⇒ 106–556px = 5.5–29.0%；
+      //   高度 ≥38%H(410px) ⇒ 40px 字 + 66px 行距 = 418px（42–58% 是行距，不是空白块）。
       // 不再用 `dsh.js` 的 `handoffCard()`（它内部是 12–14px，且是老式卡片版式）。
-      const cx = W * 0.03
-      const cy = H * 0.26
-      const cw = W * 0.31
-      const chh = H * 0.42
       const CARD = ['handoff.md', 'from session #001', 'items: 1', 'target: #002', 'ok ▸ resume']
+      const BODY_PX = 40
+      const ROW_H = 66
+      const PAD = 24
+      g.font = MONO(BODY_PX, 500)
+      const titleTh = Math.max(24, Math.round(BODY_PX * 1.3)) // = nestedWindow 的标题栏高
+      const bodyW = Math.max(...CARD.map((s) => g.measureText(s).width))
+      const cw = Math.round(Math.max(52 + g.measureText('handoff').width + 12, 18 + bodyW + PAD))
+      const chh = Math.round(titleTh + 12 + CARD.length * ROW_H + PAD)
+      const cx = Math.round(W * 0.055) // 标题栏盒 ≥5%W（G5 左沿）
+      const cy = Math.round(H * 0.2)
       g.save()
       g.globalAlpha = cardA
-      nestedWindow(g, { x: cx, y: cy, w: cw, h: chh, depth: 1, alpha: 1, label: 'handoff' })
-      g.font = MONO(36, 500)
+      const cth = nestedWindow(g, { x: cx, y: cy, w: cw, h: chh, depth: 1, alpha: 1, label: 'handoff' })
+      g.font = MONO(BODY_PX, 500)
       g.textAlign = 'left'
       g.textBaseline = 'top'
       for (let i = 0; i < CARD.length; i++) {
@@ -119,7 +149,7 @@ export default {
         if (lu <= 0) continue
         const str = CARD[i].slice(0, Math.max(1, Math.round(lu * CARD[i].length)))
         g.fillStyle = i === 0 ? C.cyan : rgba(C.fg, 0.9)
-        g.fillText(str, cx + 18, cy + 44 + i * 46)
+        g.fillText(str, cx + 18, cy + cth + 12 + i * ROW_H)
       }
       g.restore()
     }
@@ -127,14 +157,13 @@ export default {
     // ---- 3:12–3:20 handoff.md 从心脏飞进右下角新窗口 ----
     drawHandoffFlight(g, ctx, t, beatPulse)
 
-    // ---- 旧窗口变灰（session #001） ----
-    drawOldWindow(g, ctx, t, slow)
+    // ---- T53 / FIX_V5 §N 3:13：删除「左侧重新出现的那个带一堆横线的窗口」 ----
+    // 旧版是 `drawOldWindow()`（session #001，x=0.03W、y=0.16H、595×475 的变灰窗口，内含
+    // 5 行「— — —」+ `archived`）——它是 gscan 里 193.5–205.9 每帧 5–6 处 g5 越界（文字左缘 x=78px）
+    // 的来源，且与 3:13 的规格冲突，整段删除（函数体也一并删掉）。
 
-    // ---- 新窗口 session #002 + 开机日志 + restored ♥ ----
-    drawNewSession(g, ctx, t, freeze)
-
-    // ---- 3:25.96 最后一次「执行」：自动键入 + 回车闪白 → 定格 ----
-    drawFinalExecution(g, ctx, t)
+    // ---- 新窗口 session #002 + 开机日志 + restored ♥ + 3:25.96 自动键入 ----
+    drawNewSession(g, ctx, t)
 
     // ---- 定格构图的电源图标（与段 A 呼应） ----
     if (freeze > 0.5) {
@@ -224,18 +253,10 @@ function drawHandoffFlight(g, ctx, t, beat) {
   g.beginPath()
   g.arc(x, y, 46, 0, TAU)
   g.fill()
-  // 小文件（T09：标签从 11px 抬到 **36px**，文件框相应放大到 240×86，否则字会溢出）
-  roundRect(g, x - 120, y - 43, 240, 86, 8)
-  g.fillStyle = rgba('#1a1c22', 0.96)
-  g.fill()
-  g.strokeStyle = C.gold
-  g.lineWidth = 2
-  g.stroke()
-  g.font = MONO(36, 700)
-  g.fillStyle = C.gold
-  g.textAlign = 'center'
-  g.textBaseline = 'middle'
-  g.fillText('handoff.md', x, y)
+  // T53 / FIX_V5 §N 3:12：「删除中央黑底黄边的 HANDOFF.md 窗口」——
+  // 旧版在这里画一个 240×86 的黑底(#1a1c22)金边窗口 + 36px「handoff.md」标签，
+  // 起点正好是画面正中（0.50W, 0.50H）⇒ 3:12 时它停在她心口上压住主视觉（实测 192.2 文字盒
+  // x0.444–0.556 / y0.483–0.522）。现在只保留**彗星本体**（金辉光晕 + 拖尾），不再有窗口/边框/文字。
   // 拖尾
   if (!arrived) {
     g.strokeStyle = rgba(C.gold, 0.35)
@@ -252,107 +273,91 @@ function drawHandoffFlight(g, ctx, t, beat) {
   g.restore()
 }
 
-/* ---------------- 旧窗口变灰 ---------------- */
-function drawOldWindow(g, ctx, t, slow) {
-  const { W, H } = ctx
-  const a = span(t, 193.6, 194.6) * (1 - span(t, 205.4, 205.96)) * (1 - span(t, 188.5, 189.2) * 0)
-  if (a <= 0.01) return
-  const x = W * 0.03
-  const y = H * 0.16
-  const w = W * 0.31
-  const h = H * 0.44
-  g.save()
-  g.globalAlpha = a
-  nestedWindow(g, { x, y, w, h, depth: 0, alpha: 1, label: 'session #001' })
-  // 变灰的内容（T09：文字一律 ≥36px）
-  const grey = 0.35 + 0.5 * slow
-  g.globalAlpha = a * grey
-  g.fillStyle = 'rgba(60,64,72,0.85)'
-  g.fillRect(x + 8, y + 46, w - 16, h - 58)
-  g.globalAlpha = a * 0.8
-  g.font = MONO(36, 500)
-  g.fillStyle = rgba(C.fgDim, 0.7)
-  g.textAlign = 'left'
-  g.textBaseline = 'top'
-  ;['— — — — —', '— — —', '— — — —', '— —'].forEach((s, i) => g.fillText(s, x + 20, y + 62 + i * 44))
-  g.font = MONO(36, 700)
-  g.fillStyle = rgba(C.red, 0.7)
-  g.fillText('archived', x + 20, y + h - 56)
-  g.restore()
-}
-
 /* ---------------- 新会话窗口 ---------------- */
-function drawNewSession(g, ctx, t, freeze) {
-  const { W, H, sync } = ctx
-  const a = span(t, 193.2, 194.0) * (1 - freeze * 0.9)
+function drawNewSession(g, ctx, t) {
+  const { W, H } = ctx
+  // T53 / FIX_V5 §N 3:27：「电源图标出现的同一时刻，右下角会话窗口必须已消失（提前 0.3s 淡出）」。
+  // 电源图标画在 `if (freeze > 0.5)` 里，而 `freeze = span(t,205.96,206.6)` ⇒ 它**首次出现 = 206.28**
+  //（= 205.96 + 0.64×0.5）⇒ 淡出窗 = [205.98, 206.28]，窗口恰在图标出现的那一帧归零。
+  // 旧版是 `1 - freeze*0.9`（205.96 时仍剩 1.0、要到 206.5 才归零）⇒ 图标已经在画了窗口还没走。
+  const T_ICON = 205.96 + 0.64 * 0.5
+  const a = span(t, 193.2, 194.0) * (1 - span(t, T_ICON - 0.3, T_ICON))
   if (a <= 0.01) return
-  // T09 / §1.15：新会话窗口放到**右侧带** x∈[66%,97%]，文字 ≥36px。
-  // 垂直位置压到歌词区（y>0.8H=864）之上：y=0.46H、h=0.34H → 497–841 ✓
-  // 同时与爱心中心半径（圆心=画面中央、半径 28%H=302px）保持距离：x 最小 1267，1267−960=307 > 302 ✓
-  const x = W * 0.66
-  const y = H * 0.46
-  const w = W * 0.31
-  const h = H * 0.34
+  // T53 / FIX_V5 §N 3:13：「右下 SESSION 窗口：按 G1 自适应（文字不再过大）」——
+  // 旧版固定 1267×497 的 595×367 窗口，日志在 maxW=547 处折行，且最右一行 x2=1831px > 95%W=1824px
+  // ⇒ 193.5–208.5 每帧 2 处 g5 右越界；末端 `restored … ♥` 还另画成 68px 顶部居中的大字
+  // （y=0.069H < 8%H，每帧 1 处 g5 顶越界）。
+  // 现在：窗口 = 内容 + 24px 内边距（G1）、36px（30–40px 区间内）、整窗落在 [5%,95%]×[8%,80%] 内，
+  // 末行 `restored: 1 item (unreadable) ♥` 仍发光强调，但**留在窗口里**、字号回到 36px。
+  const PX = 36
+  const ROW_H = PX * 1.5
+  const PAD = 24
+  const rows = LOG.map((s, i) => (i === LOG.length - 1 ? `${s} ♥` : s))
+  g.font = MONO(PX, 500)
+  const titleTh = Math.max(24, Math.round(PX * 1.3)) // = nestedWindow 的标题栏高
+  const bodyW = Math.max(...rows.map((s) => g.measureText(s).width))
+  const w = Math.round(Math.max(52 + g.measureText('session #002').width + 12, PAD + bodyW + PAD))
+  // 末行再留一行给 3:25.96 的自动键入（旧 `drawFinalExecution` 已并入本窗口，见 R14 决策表）
+  const h = Math.round(titleTh + 12 + (rows.length + 1) * ROW_H + PAD)
+  const x = Math.round(W * 0.95) - w // 右缘贴 95%W（G5 右沿）
+  const y = Math.round(H * 0.79) - h // 下缘在 80%H 之上（G5 下沿）
   g.save()
   g.globalAlpha = a
-  nestedWindow(g, { x, y, w, h, depth: 1, alpha: 1, label: 'session #002' })
-  // 开机日志滚动（T09：≥36px）
-  const n = clamp(Math.floor((t - 193.4) / 0.9) + 1, 0, LOG.length)
-  const lines = LOG.slice(0, n).map((l, i) => ({
-    text: l,
-    color: i === LOG.length - 1 ? C.gold : C.fgDim,
-  }))
-  bootLog(g, { x: x + 14, y: y + 62, lines, alpha: 1, size: 36, lh: 1.5 })
-  // T09 / §1.15：日志末行的 `restored: 1 item (unreadable) ♥` 单独做成
-  // **≥64px 的发光大字**并轻微脉冲。放在**顶部居中**：
-  //   宽度（64px 下约 1178px）放不进 595px 宽的右窗口，而顶部居中处
-  //   距爱心中心 sqrt(432²) = 432 > 302 ✓、也不与左右两个窗口相交（它们在 y≥173）。
-  if (n >= LOG.length) {
-    const u = span(t, 197.9, 198.5) * (1 - freeze)
+  const th = nestedWindow(g, { x, y, w, h, depth: 1, alpha: 1, label: 'session #002' })
+  // 开机日志滚动（T09：≥36px）；末行留给下面的金色发光强调，避免同一行登记两次文字盒
+  const n = clamp(Math.floor((t - 193.4) / 0.9) + 1, 0, rows.length)
+  const headN = n >= rows.length ? rows.length - 1 : n
+  const bodyY = y + th + 12
+  bootLog(g, {
+    x: x + PAD,
+    y: bodyY,
+    lines: rows.slice(0, headN).map((s) => ({ text: s, color: C.fgDim })),
+    alpha: 1,
+    size: PX,
+    lh: 1.5,
+    maxW: w - PAD * 2,
+    maxH: h - th - 12 - PAD,
+  })
+  if (n >= rows.length) {
+    const u = span(t, 197.9, 198.5)
     if (u > 0.01) {
       const pulse = 1 + 0.045 * Math.sin(t * 3.6)
       g.save()
       g.globalAlpha = a * u
-      g.font = MONO(Math.round(68 * pulse), 700)
-      g.textAlign = 'center'
-      g.textBaseline = 'middle'
+      g.font = MONO(PX, 700)
+      g.textAlign = 'left'
+      g.textBaseline = 'top'
       g.shadowColor = rgba(C.gold, 0.95)
-      g.shadowBlur = 30
+      g.shadowBlur = 26 * pulse
       g.fillStyle = '#fff3d0'
-      g.fillText('restored: 1 item (unreadable) ♥', W / 2, H * 0.10)
+      g.fillText(rows[rows.length - 1], x + PAD, bodyY + (rows.length - 1) * ROW_H)
       g.restore()
     }
   }
-  g.restore()
-}
-
-/* ---------------- 最后一次「执行」 ---------------- */
-function drawFinalExecution(g, ctx, t) {
-  const { W, H } = ctx
-  const a = span(t, 205.5, 205.9) * (1 - span(t, 205.96, 205.99))
-  if (a <= 0.01) return
-  // 新会话自动键入
-  const bx = W * 0.62
-  const by = H * 0.70
-  g.save()
-  g.globalAlpha = a
-  roundRect(g, bx, by, 560, 48, 8)
-  g.fillStyle = 'rgba(14,16,20,0.95)'
-  g.fill()
-  g.strokeStyle = C.gold
-  g.lineWidth = 1.5
-  g.stroke()
-  g.font = MONO(20, 700)
-  g.fillStyle = C.amber
-  g.textAlign = 'left'
-  g.textBaseline = 'middle'
-  g.fillText('>', bx + 14, by + 24)
-  const s = typed(TYPED, t, { start: ctx.cues.sec('N', 'lastExec', 205.5) - 0.46, cps: 46, jitter: 0.1, seed: 8 })
-  g.fillStyle = C.fg
-  g.fillText(s, bx + 40, by + 24)
-  if (s.length < TYPED.length && cursorOn(t, { hz: 1.4 })) {
-    g.fillStyle = C.cyan
-    g.fillRect(bx + 42 + g.measureText(s).width, by + 12, 10, 22)
+  // T53 / §N 3:25.96：新会话自动键入 `world.execute(me);`。
+  // 旧 `drawFinalExecution()` 是个 **0.70H 的独立盒子**，正好压在本窗口末行
+  // `restored: 1 item (unreadable) ♥` 上（205.9 实测 1 处文字重叠），且字号只有 20px（< G1 的 30px）。
+  // 现在改为**本窗口的最后一行**：窗口 h 已多算一行、字号 30px（G1 区间内）、下面没有第二个盒子。
+  // 打字起点也对齐可见窗口（旧版 `cues.sec(...) - 0.46` = 205.20 起打，205.5 才显示 ⇒ 只能看到最后 5 个字）。
+  const pa = span(t, 205.5, 205.9) * (1 - span(t, 205.96, 205.99))
+  if (pa > 0.01) {
+    const PROMPT_PX = 30
+    const s = typed(TYPED, t, { start: 205.5, cps: 46, jitter: 0.1, seed: 8 })
+    const py = bodyY + rows.length * ROW_H + Math.round((ROW_H - PROMPT_PX) / 2)
+    g.save()
+    g.globalAlpha = a * pa
+    g.font = MONO(PROMPT_PX, 700)
+    g.textAlign = 'left'
+    g.textBaseline = 'top'
+    g.fillStyle = C.amber
+    g.fillText('>', x + PAD, py)
+    g.fillStyle = C.fg
+    g.fillText(s, x + PAD + 28, py)
+    if (s.length < TYPED.length && cursorOn(t, { hz: 1.4 })) {
+      g.fillStyle = C.cyan
+      g.fillRect(x + PAD + 32 + g.measureText(s).width, py + 2, 10, PROMPT_PX - 6)
+    }
+    g.restore()
   }
   g.restore()
 }
@@ -368,11 +373,12 @@ function drawCredits(g, t, W, H, crtOff) {
   if (a > 0.01) {
     g.globalAlpha = a
     const cx = W / 2
+    // T42 / FIX_V5 §G2：署名页只用英文；「界面致敬 DeepSeek Harness」整行**删除**。
+    // 作者名保留原字形（CC BY-NC-SA 署名的一部分，不是标签/对话）——见 src/ui/globalrules.js 的说明。
     const lines = [
       ['music — Mili', 30, '#e8eaee', 0],
-      ['非官方同人作品 · 含 AI 辅助生成内容', 22, '#b8bcc4', 1],
-      ['鲸鱼娘：上善 · ZipZipPipe · Small-tailqwq · dsh-whale-galgame（CC BY-NC-SA 4.0）', 18, '#b8bcc4', 2],
-      ['界面致敬 DeepSeek Harness', 18, '#8b90a0', 3],
+      ['unofficial fan work · AI-assisted', 22, '#b8bcc4', 1],
+      ['whale-maid: 上善 · ZipZipPipe · Small-tailqwq · dsh-whale-galgame (CC BY-NC-SA 4.0)', 18, '#b8bcc4', 2],
     ]
     lines.forEach(([text, size, color, i]) => {
       g.font =

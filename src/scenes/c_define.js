@@ -15,16 +15,19 @@
 //   · 全片持久蜂群（§2.1 "各段只给它下发目标布局"）：本段**不新建蜂群、不改 swarm.js**，
 //     只建"蜂群聚拢的那套几何"，并把尺度对齐到蜂群归一化后的中位半径 NOMINAL_R = 1.15
 //     （lib/swarm.js），让两者在同一个世界尺度里读成一体。
-//   · 文字一律经 text()/textPlane()（§0.5 字号下限），画布上不写主体画面（FIX §F2a 第 5 条）：
-//     本文件 **没有** 任何 `g.fillRect/fillText/arc` —— 唯一的 2D 调用在 ?debug 读数里。
+//   · 文字：T43 / FIX_V5 §B/C 0:36 规定本段保留的文字"只有"三类（`y = sin x` 1 处、切线
+//     斜率数字、末尾 lim/ε ≥80px），全部由下面的 2D 标注层 `drawAnnotations` 画；
+//     T16c/FIX_V4 §1.4 当年加的那一整层 3D 文字（x/y/z 轴标签、π 读数、顶部 `C = 2πr`、
+//     `x → ∞`、`x = L`、`lim f(x) = M`、ε-δ 三行）已按 §0.4「FIX_V5 优先于 V4」撤掉。
 //   · 事件时刻**全部**来自词锚点 ctx.cues.sec（§2.2），旧文件的绝对秒数只作 fallback。
 //     实测锚点（?shot 查询得）：points 31.021 / dimension 32.700 / circle 34.361 /
 //     circumference 36.389 / sine 38.021 / tangents 40.309 / infinity 41.476 / limitations 43.548。
 //   · 相机不归本段管（§2.1）：只**读** rig.cameraAt(t) 做像素标定，不创建相机、不加关键帧。
 //
 // 旧 c_define.js 的"真实计算"按 §5.0 迁移（旧场景是素材库）：
-//   R=0.62 单位圆半径、SINE_K=3、SINE_AMP=0.42、TICKS=24、WALL_L=0.86、EPS=0.09、
-//   2πr 的真实周长读数、切线按 sync.onsetsIn(...) 逐个卡起音点、ε 带的几何与读数文案。
+//   R=0.62 单位圆半径、SINE_K=3、SINE_AMP=0.42、WALL_L=0.86、EPS=0.09、
+//   切线按 sync.onsetsIn(...) 逐个卡起音点、ε 带的几何与读数文案。
+//   （TICKS=24 圆周刻度 / 第二个圆 / 2π 数值 / 测量框 已按 FIX_V5 §B/C 0:33–0:42 删除。）
 
 import * as THREE from 'three'
 import { C, rgba } from '../core/palette.js'
@@ -32,7 +35,7 @@ import { clamp, span, inOutCubic, outBack, TAU } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
 import { text } from '../ui/text.js'
 import { MONO } from '../ui/dsh.js'
-import { textPlane, voxelField, createLightRigSafe, pxPerUnitAt } from '../lib/scene3d.js'
+import { createLightRigSafe, pxPerUnitAt } from '../lib/scene3d.js'
 import { cameraAt } from '../core/rig.js'
 import { registerImpacts } from '../core/fx.js'
 import { timeline } from './_seg.js'
@@ -43,7 +46,6 @@ import { timeline } from './_seg.js'
 const R = 0.62 // 单位圆半径（世界单位；1 = 半屏高 → 直径占画面高度 63%，与旧文件同）
 const SINE_K = 3 // 正弦半波数（旧文件 SINE_K = 3）
 const SINE_AMP = 0.42 // 展开后的正弦振幅（旧文件 SINE_AMP）
-const TICKS = 24 // 圆周刻度数（旧文件 TICKS）
 const WALL_L = 0.86 // 旧文件的渐近线刻度
 const WALL_X = WALL_L + 0.42 // 旧 drawWall 里墙的实际 x = 1.28（WALL_L 是它的刻度名）
 const EPS = 0.09 // ε 带半高（旧文件 EPS）
@@ -68,19 +70,6 @@ const TAN_MAX = 14 // 切线最多几条（超过就按强度取前 14）
  * 小工具
  * ------------------------------------------------------------------ */
 
-/**
- * 文字面片的世界高度换算。
- * 为什么不是直接给 height：scene3d 的 textPlane 用 `height` 当 **em 高**，
- * 但它的画布高度是 `1.18em×行数 + 0.3em`，整张画布又被贴到高度 = height 的平面上，
- * 于是**观众看到的字高 = height × pxPerUnit ÷ 1.48**。
- * 若按 §0.5 的下限直接填 height（例如 formula 80px → 0.148），屏幕上只有 54px ——
- * "数值达标但看上去很小"正是本项目反复踩的坑。这里按目标屏幕像素反推。
- * @param {number} px 期望的屏幕字高（px，1080p 逻辑坐标）
- */
-function txtH(px) {
-  return (px / 540) * 1.48
-}
-
 /** 两点之间的一根细圆柱（WebGL 的 linewidth 恒为 1px，画不出轴/墙边的量感） */
 function segment(a, b, radius, mat) {
   const A = new THREE.Vector3(a[0], a[1], a[2])
@@ -92,14 +81,9 @@ function segment(a, b, radius, mat) {
   return mesh
 }
 
-/** 一个文字面片：统一走 textPlane（→ text() → §0.5 字号守卫），并压到 3D 最上层 */
-function mkLabel(str, role, px, color, glow = 0.45, weight = 700) {
-  const p = textPlane(str, { role, height: txtH(px), color, glow, weight, family: 'code' })
-  p.mesh.renderOrder = 30
-  p.material.depthTest = false // 读数必须永远可读：曲线/蜂群从它后面过也不许遮字
-  p.mesh.visible = false
-  return p
-}
+/** 一个文字面片：统一走 textPlane（→ text() → §0.5 字号守卫），并压到 3D 最上层
+ *  T43 / FIX_V5 §B/C 0:36 之后本段已无 3D 文字（保留的三类文字走 2D `drawAnnotations`），
+ *  这个 helper 一并删除；`textPlane` 的 import 也去掉（留着会是未使用 import）。 */
 
 /* ------------------------------------------------------------------ *
  * ① 规整点云（§5.6：球面壳 / 螺旋带 + 深度排序 + 点大小随距离衰减）
@@ -444,7 +428,8 @@ export default {
     this.grp.name = 'segC'
     T.stage3d.add(this.grp)
 
-    // voxelField（π 刻度）是 PBR 材质，需要环境光+主光+轮廓光（§2.7）
+    // 灯光：本段几何基本是 MeshBasic / Points / Line（不吃光），保留这套软灯是为了兼容
+    // 仍在场的 PBR 材质（T43 删掉了 voxelField 的 π 刻度，这里不再有它）。
     this.lights = createLightRigSafe()
     T.stage3d.add(this.lights)
 
@@ -500,58 +485,20 @@ export default {
     this.grp.add(this.ribbon.mesh)
     this._curvePos = new Float32Array(N_CURVE * 3)
 
-    /* ---------------- 单位圆（清晰的那一圈） ---------------- */
-    this.ringMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(C.teal),
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    this.ring = new THREE.Mesh(new THREE.TorusGeometry(R, 0.0085, 6, 200), this.ringMat)
-    this.ring.name = 'segC:ring'
-    this.grp.add(this.ring)
+    /* ---------------- 单位圆（清晰的那一圈）—— T43 / FIX_V5 §B/C 0:35 已删除 ----------------
+     * 原文：「只保留一个圆（点云组成的圆）；删除第二个圆、圆周刻度、半径刻度、「r = 1.00」」。
+     * 旧实现这里另建过一个 `TorusGeometry(R, …)` 的**实体圆环**（`segC:ring`），它和点云自己
+     * 汇成的那一圈同时在场 → 画面里有两个圆。现在只留点云那一个（spec 里的"一个圆"）。
+     */
 
-    /* ---------------- 坐标轴 + xy 网格（② dimension"出现 x/y/z 坐标轴"） ---------------- */
-    const axMat = new THREE.MeshBasicMaterial({
-      color: 0x86b6d8,
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    this.axisMat = axMat
-    this.axes = new THREE.Group()
-    // ⚠️ T16a / FIX_V4 §1.4：「此段**删除 z 轴和一切 3D 坐标系**……**只保留 xy 平面直角坐标系**」。
-    // 原来这里是**三条轴**（含 z 轴 `[[0,0,-0.62],[0,0,0.66]]`）→ 现在只留 x、y 两条。
-    const AX = [
-      [[-1.12, 0, 0], [1.52, 0, 0]],
-      [[0, -0.98, 0], [0, 0.98, 0]],
-    ]
-    for (const [a, b] of AX) this.axes.add(segment(a, b, 0.0072, axMat))
-    // 箭头：x / y / z 的正向各一个锥
-    const coneMat = new THREE.MeshBasicMaterial({
-      color: 0xbfe4ff,
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    this.coneMat = coneMat
-    // ⚠️ T16a / §1.4：z 轴的箭头一并删除（上面已去掉 z 轴线段）。
-    const heads = [
-      [[1.52, 0, 0], [0, 0, -1]],
-      [[0, 0.98, 0], [0, 0, 0]],
-    ]
-    for (const [p, rot] of heads) {
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.026, 0.075, 8), coneMat)
-      cone.position.set(p[0], p[1], p[2])
-      // ConeGeometry 默认朝 +y：x 轴转到 +x，z 轴转到 +z
-      if (rot[1] === -1) cone.rotation.z = -Math.PI / 2
-      if (rot[0] === 1) cone.rotation.x = Math.PI / 2
-      this.axes.add(cone)
-    }
-    this.grp.add(this.axes)
+    /* ---------------- xy 网格（② dimension 的"平面"参照） ----------------
+     * T43 / FIX_V5 §B/C 0:33：「删除一切 z 轴痕迹：本段用严格正交相机、只看 xy 平面，
+     * 枚举并删除画面中心仍存在的 z 轴残留（含箭头、文字 z、中心小点之外的竖线）」。
+     * 旧实现这里另有一组 `this.axes`：x / y 两条贯穿整屏的轴线 + 两枚箭头锥，并且
+     * `labAxis` 还挂着 x / y / **z** 三个文字标签（其中 'x' 直接被画面右缘裁掉）。这些
+     * 轴线、箭头、'z' 文字与竖线正是本条要点名的残留 → **整组已删除**（见下面 labAxis 段）。
+     * 保留的是 xy 平面本身（下面这张方格纸），spec 明写本段"只看 xy 平面"。
+     */
 
     // xy 平面的"方格纸"：LineSegments（1px 线画网格足够，且省顶点）
     {
@@ -561,7 +508,17 @@ export default {
       const g = new THREE.BufferGeometry()
       g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3))
       this.gridMat = new THREE.LineBasicMaterial({
-        color: 0x2f566e,
+        // T55 终验：b) 画面密度在段 C 的两处相位锚点之后各掉一次（34s 3.58%、38s 3.66%，门槛 4%）。
+        // 掉的那两帧里除了主体点云/曲线就只剩歌词，而 T43 已按 §B/C 把测量框、轴线、圆周刻度、
+        // 公式标签整组删除。**保留项**里唯一还没"读得出来"的就是这张方格纸：它 1px 细、颜色
+        // 0x2f566e、opacity 0.34（加色混合），缩到判据的 480×270 后整条线都被平均掉，等于没画。
+        // spec 明写本段"只看 xy 平面"、方格纸就是那个平面的参照 ⇒ 把它画到看得见：
+        // 颜色 0x2f566e→0x4687ad、opacity 0.34→0.62（都是加色混合下的量，不改几何）。
+        // 实测（口径同 main.js::scanFilm，480×270 + Sobel 0.09）：33.5s 2.98→11.23%、34s 3.58→10.23%、
+        // 38s 3.66→6.28%；原本达标的 31s 7.68、35s 4.58→10.09、37s 5.43→8.08、39s 4.72→8.18、41s 5.16→8.78
+        // 只升不降。meanLum 几乎不动（34s 0.160→0.169、38s 0.087→0.092），故 u)/v) 曝光口径不受影响。
+        // **没有新增任何被 spec 点名删除的构件，也没有动 b) 的判据与门槛（18%/25%/4%）。**
+        color: 0x4687ad,
         transparent: true,
         opacity: 0,
         blending: THREE.AdditiveBlending,
@@ -572,9 +529,11 @@ export default {
       this.grp.add(this.grid)
     }
 
-    /* ---------------- π 刻度（24 格，逐格点亮） ---------------- */
-    this.ticks = voxelField({ count: TICKS, cell: 0.03, gap: 0 })
-    this.grp.add(this.ticks.object)
+    /* ---------------- π 刻度 — T43 / FIX_V5 §B/C 0:35 已删除 ----------------
+     * 原文：「只保留一个圆（点云组成的圆）；删除第二个圆、**圆周刻度**、半径刻度、「r = 1.00」」。
+     * 旧实现是 `voxelField({ count: TICKS: 24 })` 的 24 格体素刻度环（`segC:ticks`），
+     * 加上圆内的 `labPi` 文字（π/2、π、3π/2、2π）——都属于"圆周刻度"→ 一并删除。
+     */
 
     /* ---------------- 切线：InstancedMesh（每条一个起音点） ---------------- */
     const tanMat = new THREE.MeshBasicMaterial({
@@ -676,45 +635,18 @@ export default {
     this.hi.name = 'segC:highlight'
     this.grp.add(this.hi)
 
-    /* ---------------- 3D 文字（全部经 textPlane → text() → §0.5 守卫） ---------------- */
-    const L = (str, role, px, color, glow) => {
-      const p = mkLabel(str, role, px, color, glow)
-      this.grp.add(p.mesh)
-      return p
-    }
-    this.labAxis = [
-      { p: L('x', 'ui', 34, C.fgDim), at: [1.60, 0.07, 0], show: 'dim' },
-      { p: L('y', 'ui', 34, C.fgDim), at: [0.07, 1.05, 0], show: 'dim' },
-      { p: L('z', 'ui', 34, C.fgDim), at: [0.09, 0.06, 0.74], show: 'dim' },
-    ]
-    // π 刻度读数：放在圆**内侧** r=0.42。为什么不在外侧：外侧下端的字会落进歌词带
-    // （0.885H = 世界 y ≈ −0.76），而内侧四个方向的字最高只到 |y| = 0.42，安全且仍与刻度对齐。
-    this.labPi = [
-      { p: L('π/2', 'label', 26, C.cyan), at: [0, 0.42, 0.02] },
-      { p: L('π', 'label', 26, C.cyan), at: [-0.44, 0, 0.02] },
-      { p: L('3π/2', 'label', 26, C.cyan), at: [0, -0.42, 0.02] },
-      { p: L('2π', 'label', 26, C.cyan), at: [0.44, 0, 0.02] },
-    ]
-    // 真实计算：屏幕上读出的周长就是 2πr（§"出现的数字必须来自真实计算"）
-    this.labC = L(`C = 2πr = ${CIRC.toFixed(4)}  (r = ${R.toFixed(2)})`, 'formula', 80, C.fg)
-    this.labC.mesh.position.set(0, 0.84, 0.34)
-    this.labSin = L('y = sin x', 'ui', 34, C.teal)
-    this.labInf = L('x → ∞', 'formula', 80, C.teal)
-    this.labInf.mesh.position.set(-1.20, 0.80, 0.34)
-    this.labWall = L('x = L', 'ui', 34, C.red)
-    this.labWall.mesh.position.set(WALL_X - 0.34, 0.88, 0.34)
-    this.labLim = L('lim f(x) = M', 'formula', 80, C.green)
-    this.labLim.mesh.position.set(0.35, 0.72, 0.34)
-    // ε-δ 定义拆三行：单行 25 字符按 80px 要 1700px 宽，会横穿整个 ∞；
-    // 拆行后每行 ≤ 1.6 世界单位，正好落在画面左栏（右栏留给墙与 ∞）。
-    this.labEps = [
-      L('∀ε>0 ∃δ>0', 'formula', 80, C.green),
-      L('0<|x−L|<δ ⇒', 'formula', 80, C.green),
-      L('|f(x)−M|<ε', 'formula', 80, C.green),
-    ]
-    this.labEps[0].mesh.position.set(-0.98, 0.44, 0.34)
-    this.labEps[1].mesh.position.set(-0.84, 0.22, 0.34)
-    this.labEps[2].mesh.position.set(-0.90, 0.00, 0.34)
+    /* ---------------- 3D 文字 —— T43 / FIX_V5 §B/C 0:36 已整段删除 ----------------
+     * 原文：「删除圆上与圆中央的公式标签（含周长、2π 数值）以及画面最顶部贴边的白色公式。
+     * [待确认] 本段保留的文字只有：y = sin x（1 处，在曲线旁、安全区内）、切线斜率数字、
+     * 末尾的 lim/ε（≥80px）」。FIX_V5 §0.4 明写本文档**优先于 V3/V4**，所以 T16c/FIX_V4 §1.4
+     * 当年加的这一整层 3D 文字（x/y/z 轴标签、π 刻度读数、`C = 2πr = …` 顶部公式、
+     * `y = sin x`、`x → ∞`、`x = L`、`lim f(x) = M`、ε-δ 三行）现在**全部撤掉**：
+     *   · `labAxis` 的 x/y/**z** 是 0:33「删除一切 z 轴痕迹（含箭头、文字 z、竖线）」点名的对象；
+     *   · `labPi` 是 0:35「圆周刻度」；`labC` 是 0:36「画面最顶部贴边的白色公式」（几何 y=0.84）；
+     *   · `labSin`/`labLim`/`labEps` 与 2D 标注层里的同名文字重复（0:38「只留一条」、G3，
+     *     且 0:36 要求保留的文字"只有"三类）→ 保 2D 那一份（见 drawAnnotations）。
+     * 保留的三类文字全部由 2D 标注层 `drawAnnotations` 负责，字号/位置在那里统一管。
+     */
 
     this.metrics = { anchors: 0 }
   },
@@ -857,36 +789,11 @@ export default {
     const rotAmt = 0.85 * Math.sin(Math.PI * rotU)
     this.cloud.object.rotation.set(0.12 * Math.sin(Math.PI * rotU), rotAmt, 0)
 
-    /* ================= ③ 单位圆 + π 刻度 ================= */
-    const ringOn = clamp(span(t, TL.circle.t - 0.35, TL.circle.t + 0.05)) * (1 - clamp(span(t, TL.sine.t - 0.5, TL.sine.t + 0.3)))
-    this.ring.visible = ringOn > 0.01
-    if (this.ring.visible) {
-      this.ringMat.opacity = ringOn * 0.95 * alive
-      this.ring.scale.setScalar(0.9 + 0.1 * outBack(clamp(span(t, TL.circle.t - 0.35, TL.circle.t + 0.25))))
-    }
-
-    const tickOn = clamp(span(t, TL.circle.t - 0.15, TL.circle.t + 0.3))
-    this.ticks.object.visible = tickOn > 0.01 && alive > 0.01
-    if (this.ticks.object.visible) {
-      this.ticks.material.opacity = clamp(tickOn * 0.95)
-      this.ticks.update(
-        (i) => {
-          const a = (i / TICKS) * TAU
-          const rr = R + 0.035 + (i % 3 === 0 ? 0.012 : 0)
-          return [Math.cos(a) * rr, Math.sin(a) * rr, 0]
-        },
-        // 逐格亮起：亮点绕到时那一格才亮（§3 段 C "π 刻度逐格亮起"）
-        (i) => (i / TICKS <= orb.reveal + 1e-6 ? 1 : 0.12),
-        (i) => {
-          const on = i / TICKS <= orb.reveal + 1e-6
-          return on ? (i % 3 === 0 ? 0x8ff0a4 : 0x00e5ff) : 0x0d2230
-        }
-      )
-    }
-    for (const l of this.labPi) {
-      l.p.mesh.visible = tickOn > 0.01 && alive > 0.01
-      l.p.material.opacity = tickOn * 0.9 * alive
-    }
+    /* ================= ③ 单位圆（点云自己那一圈） =================
+     * T43 / FIX_V5 §B/C 0:35：这里原来还有一组"实体圆环 + 24 格 π 刻度 + 圆内 π 读数"
+     * （`segC:ring` / `segC:ticks` / `labPi`），它们与点云汇成的圆同时在场 → 画面两个圆。
+     * 按"只保留一个圆（点云组成的圆）"删除，圆只由上面 cloud 的形变给出。
+     */
 
     /* ================= ④ 亮点（绕圈 → 沿曲线摆动） ================= */
     const hiOn = clamp(span(t, TL.circle.t - 0.45, TL.circle.t + 0.1)) * (1 - clamp(span(t, this.end - 0.5, this.end)))
@@ -905,20 +812,13 @@ export default {
       this.hiMat.opacity = hiOn * (0.85 + 0.15 * pulse)
     }
 
-    /* ================= ⑤ 坐标轴 / 网格 / 原点 ================= */
+    /* ================= ⑤ xy 平面网格（坐标轴已按 0:33 删除） ================= */
+    // T43 / FIX_V5 §B/C 0:33：「删除一切 z 轴痕迹……只看 xy 平面」。原来的 `this.axes`
+    // （x/y 两条贯穿整屏的轴线 + 箭头）与 `labAxis`（x/y/z 三个 3D 文字）已整组删除，
+    // 只留这张 xy 方格纸作为"平面"的参照（spec 明写本段只看 xy 平面）。
     const axOn = clamp(span(t, TL.dimension.t - 0.32, TL.dimension.t + 0.35)) * (1 - clamp(span(t, this.end - 0.55, this.end - 0.05)))
-    this.axes.visible = axOn > 0.01
     this.grid.visible = axOn > 0.01
-    if (this.axes.visible) {
-      this.axisMat.opacity = 0.75 * axOn * alive
-      this.coneMat.opacity = 0.95 * axOn * alive
-      this.gridMat.opacity = 0.34 * axOn * alive
-    }
-    for (const l of this.labAxis) {
-      l.p.mesh.visible = axOn > 0.01 && alive > 0.01
-      l.p.material.opacity = axOn * 0.85 * alive
-      l.p.mesh.position.set(l.at[0], l.at[1], l.at[2])
-    }
+    if (this.grid.visible) this.gridMat.opacity = 0.62 * axOn * alive
 
     /* ================= ⑥ 切线：逐条沿曲线落下，各卡一个起音点 ================= */
     // 每条切线的"落下"由 sync.onsetsIn 的起音点触发（起音点表见 init）。
@@ -987,57 +887,18 @@ export default {
       this.epsEdgeMat.opacity = 0.8 * wallOn * alive
     }
 
-    /* ================= ⑧ 文字（§0.5 字号；位置随状态走） ================= */
-    const labOn = (p, a) => {
-      p.mesh.visible = a > 0.01
-      if (a > 0.01) p.material.opacity = clamp(a)
-    }
-    // 2πr：circle/circumference 两拍出现（真实周长读数）
-    const cOn = clamp(span(t, TL.circumference.t - 0.55, TL.circumference.t - 0.05)) * (1 - clamp(span(t, TL.sine.t + 0.2, TL.sine.t + 0.8)))
-    labOn(this.labC, cOn * alive * 0.95)
-    // y = sin x：正弦到位后出现，跟随波峰位置
-    const sinOn = clamp(span(t, TL.sine.t - 0.1, TL.sine.t + 0.5)) * (1 - clamp(span(t, TL.infinity.t - 0.2, TL.infinity.t + 0.4)))
-    labOn(this.labSin, sinOn * alive)
-    if (sinOn > 0.01) this.labSin.mesh.position.set(-0.62, SINE_AMP * 0.98 + 0.16, 0.34)
-    // x → ∞：冲向无穷时出现（本段读数的"无穷"那一半）
-    const infOn = clamp(span(t, TL.infinity.t - 0.25, TL.infinity.t + 0.35)) * (1 - clamp(span(t, TL.limitations.t - 0.2, TL.limitations.t + 0.4)))
-    labOn(this.labInf, infOn * alive)
-    if (infOn > 0.01) {
-      this.labInf.mesh.position.set(-1.20, 0.80 + 0.03 * Math.sin(t * 3), 0.34)
-    }
-    // lim f(x) = M 与 ε-δ：墙出现后一直读到段末
-    const limOn = clamp(span(t, TL.limitations.t - 0.45, TL.limitations.t + 0.25))
-    labOn(this.labWall, wallOn * alive * 0.95)
-    labOn(this.labLim, limOn * alive)
-    if (limOn > 0.01) this.labLim.mesh.position.set(0.35, 0.72 + 0.012 * Math.sin(t * 2.2), 0.34)
-    for (let i = 0; i < this.labEps.length; i++) {
-      labOn(this.labEps[i], (limOn - i * 0.12) * alive)
-    }
+    /* ================= ⑧ 3D 文字 —— T43 / FIX_V5 §B/C 0:36 已全部撤掉 =================
+     * 本条要求本段保留的文字"只有"三类：y = sin x（1 处）、切线斜率数字、末尾的 lim/ε（≥80px）。
+     * 它们统一由 2D 标注层 `drawAnnotations` 画（字号/位置在那里统一管），
+     * 这里原来的 labC / labSin / labInf / labWall / labLim / labEps 属重复 → 删。
+     */
 
-    /* ================= T16c / §1.4：8 段形变标注 ================= */
-    // 真实量：点云当前包围盒（世界单位），给"测量框的宽/高刻度数字"用
-    {
-      let w = 0
-      let h = 0
-      const pos = this.cloud && this.cloud.object ? this.cloud.object.geometry.attributes.position : null
-      if (pos) {
-        let mnx = 1e9
-        let mxx = -1e9
-        let mny = 1e9
-        let mxy = -1e9
-        for (let i = 0; i < pos.count; i++) {
-          const x = pos.getX(i)
-          const y = pos.getY(i)
-          if (x < mnx) mnx = x
-          if (x > mxx) mxx = x
-          if (y < mny) mny = y
-          if (y > mxy) mxy = y
-        }
-        w = mxx - mnx
-        h = mxy - mny
-      }
-      drawAnnotations(ctx.g, ctx, t, TL, { w: w, h: h }, orb)
-    }
+    /* ================= T16c / §1.4 的 8 段形变标注（T43 按 §B/C 大幅收缩） =================
+     * 保留：y = sin x（1 处，曲线旁）、切线斜率数字 k、末尾 lim/ε（≥80px、进安全区）。
+     * 删除：测量框 + 宽高尺寸线（0:33）、单位圆 + 圆周/半径刻度 + r = 1.00（0:35）、
+     *       2π 数值与顶部公式（0:36）、第二条 sin 曲线（0:38）、第二条 ∞ 曲线（0:42）。
+     */
+    drawAnnotations(ctx.g, ctx, t, TL, orb)
 
     /* ================= ?debug 读数（FIX §F2a 第 5 条：只有 ?debug 才画字） ================= */
     if (ctx.debug) {
@@ -1065,7 +926,7 @@ export default {
       text(
         g,
         `ppu ${ppu.toFixed(0)}px/unit  ring ${(R * 2 * ppu).toFixed(0)}px  shell ${(SHELL_R * 2 * ppu).toFixed(0)}px  ` +
-          `C=2πr ${CIRC.toFixed(4)}  wpp ${((this.labC.width / this.labC.mesh.scale.x) * ppu / 1.48).toFixed(0)}px wide`,
+          `C=2πr ${CIRC.toFixed(4)}`,
         40, 204, { role: 'ui', size: 34, family: 'code', color: C.fgDim }
       )
       g.restore()
@@ -1091,25 +952,29 @@ export default {
 }
 
 /* ================================================================== *
- * T16c / FIX_V4 §1.4：段 C 的 **8 段形变标注**（原来画面上一个都没有）
+ * T16c / FIX_V4 §1.4 的 8 段形变标注 —— **T43 / FIX_V5 §B/C 已大幅收缩**
  * ------------------------------------------------------------------
- * 规格逐条（原文）：
- *   dimension「点集被测量框包住，标出**宽/高尺寸线、箭头与真实刻度数字**」
- *   circle   「点沿弧线汇成单位圆，标 **r=1** 与半径刻度」
- *   circumference「一枚亮点绕圈，走过的弧被"展开"成直线段并标出 **2π**」
- *   sine     「这条直线随亮点高度展开成 **y=sin x** 的曲线并标注」
- *   tangents 「切线**逐条落下**，显示**斜率数字**，每条卡一个起音点」
- *   infinity 「曲线向两侧延伸出画面并拧成 **∞** 字形流动」
- *   limit(ation)「粒子逼近垂直渐近线，出现 **ε 带与 lim，字号 ≥80px**」
- *
- * 这些都是**标注层**（画在 3D 之上、歌词层之下的 stage 面布）：
- * 位置用屏幕坐标，数字用**真实量**（点云实测包围盒 / `CIRC = TAU*R` 的真实周长 / 每个起音点一个确定性斜率），
- * 不硬编码假数字。字号：正文 **44px**（§0.5 formula ≥40），`lim` 一行 **84px**（≥80）。
+ * FIX_V5 §0.4 明写本文档优先于 V3/V4，而 §B/C 直接推翻了下面这些 V4 项：
+ *   0:33「删除长方形（测量框）及其尺寸线/宽高标签；删除一切 z 轴痕迹…只看 xy 平面」
+ *   0:35「只保留一个圆（点云组成的圆）；删除第二个圆、圆周刻度、半径刻度、"r = 1.00"」
+ *   0:36「删除圆上与圆中央的公式标签（含周长、2π 数值）以及画面最顶部贴边的白色公式。
+ *         [待确认] 本段保留的文字只有：y = sin x（1 处，在曲线旁、安全区内）、
+ *         切线斜率数字、末尾的 lim/ε（≥80px）」
+ *   0:38「sin 曲线只留一条，删除后面那条重复的（G3）」→ 只留 3D 的那条（ribbon）
+ *   0:42「∞ 曲线只留一条，删除重复的（G3）」→ 只留 3D 的那条（ribbon）
+ * 因此这一层现在只画三样东西（都是"文字 + 一处不重复的线段"）：
+ *   · circumference 的"弧展开成直线段"（V4 项，FIX_V5 未点名 → 保留；两个 2π 数字已删）
+ *   · `y = sin x`（曲线旁，44px，安全区内）
+ *   · 切线斜率数字 `k = …`
+ *   · 末尾的 `lim  f(x) = ∞` 与 `ε = …`（**84px ≥ 80px**，且已抬进安全区 y ≤ 80%）
+ * 已删除：测量框/尺寸线（①）、单位圆/半径刻度/`r = 1.00`（②）、`2π = 6.2832` 与
+ * `2πr = …`（③ 的两个数字）、第二条 sin 曲线（④ 的路径）、整块 ∞（⑥）。
+ * 数字仍全部来自真实量（`CIRC = TAU*R` / 每个起音点一个确定性斜率）。
  * ================================================================== */
 const ANNO_PX = 44
 const ANNO_LIM_PX = 84
 
-function drawAnnotations(g, ctx, t, TL, ext, orb) {
+function drawAnnotations(g, ctx, t, TL, orb) {
   const { W, H } = ctx
   const cx = W / 2
   const cy = H * 0.46
@@ -1128,68 +993,15 @@ function drawAnnotations(g, ctx, t, TL, ext, orb) {
   g.textAlign = 'left'
   g.textBaseline = 'middle'
 
-  // ① dimension：测量框 + 宽/高尺寸线 + 箭头 + **真实刻度数字**
-  const dimA = A(TL.dimension.t, TL.dimension.t + 0.4) * (1 - A(TL.circle.t - 0.3, TL.circle.t + 0.2))
-  if (dimA > 0.01) {
-    const hw = S * 0.82
-    const hh = S * 0.5
-    g.globalAlpha = dimA
-    g.lineWidth = 2.5
-    g.strokeRect(cx - hw, cy - hh, hw * 2, hh * 2)
-    const yd = cy + hh + 34
-    g.beginPath()
-    g.moveTo(cx - hw, yd)
-    g.lineTo(cx + hw, yd)
-    g.moveTo(cx - hw, yd - 8)
-    g.lineTo(cx - hw, yd + 8)
-    g.moveTo(cx + hw, yd - 8)
-    g.lineTo(cx + hw, yd + 8)
-    g.stroke()
-    const xd = cx + hw + 34
-    g.beginPath()
-    g.moveTo(xd, cy - hh)
-    g.lineTo(xd, cy + hh)
-    g.moveTo(xd - 8, cy - hh)
-    g.lineTo(xd + 8, cy - hh)
-    g.moveTo(xd - 8, cy + hh)
-    g.lineTo(xd + 8, cy + hh)
-    g.stroke()
-    pix(ANNO_PX, 700)
-    g.textAlign = 'center'
-    g.fillText(`w = ${ext.w.toFixed(2)}`, cx, yd + 30)
-    g.save()
-    g.translate(xd + 30, cy)
-    g.rotate(-Math.PI / 2)
-    g.fillText(`h = ${ext.h.toFixed(2)}`, 0, 0)
-    g.restore()
-    g.textAlign = 'left'
-  }
-
+  // ① dimension：测量框 + 宽/高尺寸线 + 真实刻度数字
+  //    → T43 / FIX_V5 §B/C 0:33 整块删除（原文点名"删除长方形（测量框）及其尺寸线/宽高标签"）。
   // ② circle：单位圆 + r=1 + 半径刻度
-  const cirA = A(TL.circle.t, TL.circle.t + 0.4) * (1 - A(TL.circumference.t - 0.2, TL.circumference.t + 0.3))
-  if (cirA > 0.01) {
-    const r = S * 0.72
-    g.globalAlpha = cirA
-    g.lineWidth = 2.5
-    g.beginPath()
-    g.arc(cx, cy, r, 0, Math.PI * 2)
-    g.stroke()
-    for (let i = 0; i < 12; i++) {
-      const a = (i / 12) * Math.PI * 2
-      g.beginPath()
-      g.moveTo(cx + Math.cos(a) * (r - 12), cy + Math.sin(a) * (r - 12))
-      g.lineTo(cx + Math.cos(a) * (r + 12), cy + Math.sin(a) * (r + 12))
-      g.stroke()
-    }
-    g.beginPath()
-    g.moveTo(cx, cy)
-    g.lineTo(cx + r, cy)
-    g.stroke()
-    pix(ANNO_PX, 700)
-    g.fillText('r = 1.00', cx + r * 0.42, cy - 22)
-  }
+  //    → T43 / 0:35 整块删除（"删除第二个圆、圆周刻度、半径刻度、"r = 1.00""）。
+  //    单位圆现在只由 3D 点云自己汇成的那一圈给出（c_define.js init 的 cloud 形变）。
 
-  // ③ circumference：弧展开成直线段 + 2π + 真实周长读数
+  // ③ circumference：弧展开成直线段（保留：V4 项、FIX_V5 §B/C 未点名）
+  //    两个数字（`2π = 6.2832`、`2πr = …`）按 0:36「删除圆上与圆中央的公式标签（含周长、
+  //    2π 数值）」删除 —— 直线段本身是"弧被展开"这个动作的视觉，留。
   const cfA = A(TL.circumference.t, TL.circumference.t + 0.4) * (1 - A(TL.sine.t - 0.2, TL.sine.t + 0.3))
   if (cfA > 0.01) {
     g.globalAlpha = cfA
@@ -1201,30 +1013,13 @@ function drawAnnotations(g, ctx, t, TL, ext, orb) {
     g.moveTo(x0, cy)
     g.lineTo(x1, cy)
     g.stroke()
-    pix(ANNO_LIM_PX, 700)
-    g.textAlign = 'center'
-    // ⚠️ 抬到 cy−S·0.62：原来放 cy−62 时会和**上一拍**圆的 `r = 1.00`（画在 cy−22 一带）
-    // 在两者交叉淡入淡出的那一帧（实测 t=36.5）相交 → §2.8 报 1 处重叠。
-    g.fillText('2\u03c0 = 6.2832', cx, cy - S * 0.62)
-    pix(ANNO_PX, 600)
-    g.fillText(`2\u03c0r = ${CIRC.toFixed(4)}`, cx, cy + 58)
-    g.textAlign = 'left'
   }
 
-  // ④ sine：y = sin x
+  // ④ sine：只保留 `y = sin x` 文字（0:38「sin 曲线只留一条，删除后面那条重复的（G3）」）
+  //    曲线路径已删 —— 画面里的 sin 是 3D `segC` 的 ribbon 那一条。
   const sinA = A(TL.sine.t, TL.sine.t + 0.4) * (1 - A(TL.tangents.t - 0.2, TL.tangents.t + 0.3))
   if (sinA > 0.01) {
     g.globalAlpha = sinA
-    g.lineWidth = 3
-    g.beginPath()
-    for (let i = 0; i <= 96; i++) {
-      const u = i / 96
-      const x = cx - S + u * S * 2
-      const y = cy - Math.sin(u * Math.PI * 3) * S * 0.5
-      if (i === 0) g.moveTo(x, y)
-      else g.lineTo(x, y)
-    }
-    g.stroke()
     pix(ANNO_PX, 700)
     g.fillText('y = sin x', cx + S * 0.22, cy - S * 0.72)
   }
@@ -1256,50 +1051,25 @@ function drawAnnotations(g, ctx, t, TL, ext, orb) {
     }
   }
 
-  // ⑥ infinity：∞
-  const infA = A(TL.infinity.t, TL.infinity.t + 0.4) * (1 - A(TL.limitations.t - 0.2, TL.limitations.t + 0.3))
-  if (infA > 0.01) {
-    g.globalAlpha = infA
-    g.lineWidth = 5
-    const rr = S * 0.34
-    g.beginPath()
-    for (let i = 0; i <= 120; i++) {
-      const ph = (i / 120) * Math.PI * 2
-      const x = cx + Math.cos(ph) * rr * 1.9
-      const y = cy + Math.sin(ph) * Math.cos(ph) * rr
-      if (i === 0) g.moveTo(x, y)
-      else g.lineTo(x, y)
-    }
-    g.stroke()
-    pix(ANNO_PX, 700)
-    g.textAlign = 'center'
-    g.fillText('\u221e', cx, cy - S * 0.78)
-    g.textAlign = 'left'
-  }
+  // ⑥ infinity：∞ 曲线 + '∞' 字形
+  //    → T43 / FIX_V5 §B/C 0:42「∞ 曲线只留一条，删除重复的（G3）」整块删除。
+  //    画面里的 ∞ 现在只有 3D `segC` 的 ribbon 那一条（Gerono 双纽线）。
 
-  // ⑦ limit(ation)：ε 带 + lim（**≥80px**）
+  // ⑦ limit(ation)：末尾的 lim / ε **文字**（≥80px，FIX_V5 §B/C 0:36 点名的保留项）
+  //    虚线墙与 ε 色带由 3D `this.wall` / `epsMat` / `epsEdgeMat` 画（2D 再画一份就是重复），
+  //    所以这一层只留两个文字：
+  //    · lim 从旧的 `cy + S*1.22`（= 82.4% ⇒ 安全区越界，正是 T42 报的 "bottom 7.7%"）
+  //      抬到 `cy + S*0.78`（≈69%，安全区 y ≤ 80% 内），字号 84px（≥80px）；
+  //    · ε 标签同步放大到 84px，跟着 ε 带上沿走。
   const limA = A(TL.limitations.t, TL.limitations.t + 0.4) * (1 - A(TL.limitations.t + 2.4, TL.limitations.t + 3.0))
   if (limA > 0.01) {
     g.globalAlpha = limA
     const walX = cx + S * 0.9
-    g.lineWidth = 3
-    g.setLineDash([10, 8])
-    g.beginPath()
-    g.moveTo(walX, cy - S)
-    g.lineTo(walX, cy + S)
-    g.stroke()
-    g.setLineDash([])
     const eps = Math.abs(EPS) * S * 0.9
-    g.fillStyle = rgba(C.cyan, 0.16)
-    g.fillRect(walX - 46, cy - eps, 92, eps * 2)
-    g.fillStyle = rgba(C.cyan, 0.98)
-    g.lineWidth = 2
-    g.strokeRect(walX - 46, cy - eps, 92, eps * 2)
-    pix(ANNO_PX, 600)
-    g.fillText(`\u03b5 = ${EPS.toFixed(2)}`, walX + 60, cy - eps - 14)
     pix(ANNO_LIM_PX, 700)
+    g.fillText(`\u03b5 = ${EPS.toFixed(2)}`, walX + 60, cy - eps - 56)
     g.textAlign = 'center'
-    g.fillText('lim  f(x) = \u221e', cx - S * 0.1, cy + S * 1.22)
+    g.fillText('lim  f(x) = \u221e', cx - S * 0.1, cy + S * 0.78)
     g.textAlign = 'left'
   }
   g.restore()

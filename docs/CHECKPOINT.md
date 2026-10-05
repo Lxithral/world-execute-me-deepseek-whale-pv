@@ -1260,3 +1260,806 @@ PASS  q2 F2b 交付物 代码墙 7 层/7 语言/每行 72px；蜂群 3600 粒 / 
 对比本轮开始时的 15 PASS / 5 FAIL → 现在 **18 PASS / 2 FAIL**：
 修好的是 `a)`（相机顺序，决策 R0-D10）、`r)` 的段 I 部分、`t)`（§4.4 效果密度）、`q2`（Monitor 量纲写错）。
 剩下的 `b)` 是 F1 起就记录的既有项（D14），`r)` 的剩余部分在段 K（§10 归 R3）。
+
+---
+
+## T40 导出 MP4（FIX_V5 §1）— 已完成（测试片）
+
+队列改动：T40–T55 已原样插到队列最前，旧 T31–T35 标 `[暂缓]`（实时帧率优化改走离线导出，只保留 G8 对隧道的优化）。
+
+```
+npm run doctor                          → PASS 5  FAIL 0
+  b2 import 检查     72 个模块全部可 import
+  d  __errors 为空   window.__errors 为空
+npm run export -- --from 60 --to 62 --fps 60 --out out/test.mp4 --verify
+  渲染器  ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 vs_5_0 ps_5_0, D3D11)
+  每帧渲染  mean 6.5ms / p50 4.4ms / p95 11.8ms
+  每帧总耗时 mean 147.9ms / p50 146.1ms / p95 174.2ms（渲染+PNG 编码+POST）
+  帧数 120（60–62s @60fps），跳过 0；chunk c0060.mp4 120 帧 2.3MB；concat 1 块
+  成片 out/test.mp4 2.000s 2.40MB；h264 High yuv420p 1920×1080 60fps 9780kb/s + aac 48kHz 259kb/s
+  全片预计 12714 帧 × 147.9ms ≈ 31.3 分钟
+  --verify 第 60 帧（t=61.000）平均绝对差 0.710% ≤1% PASS
+文字重叠（本项窗口）?probe=textscan&scan=0.2：全片 1060 帧，59.8–62.2s 命中 0 帧
+```
+
+### T40 的三条关键结论
+
+1. **`?shot` 单张截图比导出帧暗 18.7% 是「首次渲染 3D 层未就绪」，不是导出改了画面。** 同一个 t 再渲染一次后，`?shot`、`?shot`+60 帧预热、`?export=1` 三种路径的快照**逐像素 0.000% 相同**；分层证据 `comp.threeCanvas` mean [8.58,3.97,6.75]（首帧）→ [51.25,57.97,82.82]（稳态），`view` 层差 20.3%。与 `preserveDrawingBuffer`、预热帧数、音频加载、导出代码路径**均无关**（`?shot=60.1&readback=1` 与 `?shot=60.1` 完全相同）。故 `--verify` 的参照物在取图前补一次 `__renderAt(t)`。
+2. **导出路径不改画面逻辑**：`?export=1` 只做 DPR 固定 1.0、关看门狗、不建音频、隐藏控制条、`preserveDrawingBuffer`、`gl.finish()`；画面仍由同一个 `renderAt(t)` 产生。
+3. **断点续做按帧数校验**：每块写 `<块>.done` 帧数 sidecar，帧数与本计划不符即重做（冒烟留下的 6 帧 `c0060.mp4` 被 120 帧的测试片正确弃用）。
+
+## 决策日志（R1：T40 导出）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R1-D1 | 音视频全部由 `ffmpeg-static` 自带二进制完成，不依赖系统 ffmpeg | §1 明写 `npm i ffmpeg-static` | 卸载依赖，改回系统 `ffmpeg` |
+| R1-D2 | 手动解包 `ffmpeg-static` 到 `node_modules/ffmpeg-static/ffmpeg.exe`（6.1.1） | `install.js` 在本机挂死 20 分钟并留下不完整 exe（`spawn EBUSY`→`EFTYPE`）；**不要重跑 install.js** | 删 `node_modules/ffmpeg-static` 重装（可能复现挂死） |
+| R1-D3 | 帧序列经页面侧 `fetch` POST 到本地 sink，再串行喂 ffmpeg 管道 | 浏览器无法直接写文件；串行 chain 保证帧序 | 改回 CDP `Page.captureScreenshot` |
+| R1-D4 | 分块 + `.done` 帧数 sidecar 断点续做 | 全片 31 分钟，中断不能白跑 | `--no-resume` 忽略已存在块 |
+| R1-D5 | `--verify` 参照物在取图前补渲染一次 | `?shot` 首帧 3D 层未就绪（结论 1），否则误报 18.7% 差异 | 删掉补渲染即退回误报口径 |
+| R1-D6 | 60–62s 属段 E（`e_deal` 59.0–74.0），本测试片为修正前画面 | T45 才处理 §E（1:05 删太阳、改奖励折线） | — |
+| R1-D7 | 全片扫描发现的 `t=38.2`（段 C）stage 层重叠 `2π = 6.2832` ∩ `y = sin x` 不在 T40 修 | 属 T43 范围；本项只要求窗口内重叠 0 | 留给 T43 |
+
+### 仍未完成 / 已知问题（T40 之后）
+
+1. 全片导出未跑（预计 ≈31.3 分钟），留到 **T55** 终验。
+2. 段 C `t=38.2` 的 stage 层文字重叠（IoU 0.137）→ **T43**。
+3. `b)` 画面密度 12/213 帧不达标（既有项 D14）、`r)` 段 K 重叠（R3）仍为 selftest 的 2 个 FAIL，与 T40 无关。
+
+---
+
+## T41 全局面板系统（FIX_V5 §G1）— 已完成
+
+完成定义是「列出全片所有面板并逐一量化（文字包围盒是否 ⊂ 面板）」。
+
+```
+node .scratch_layers.mjs scan 0.2           → 1060 帧
+  文字重叠  全片仅 1 帧命中：t=38.2 (C) ×1 stage IoU=0.137「2π = 6.2832」∩「y = sin x」→ 属 T43
+  面板      全片出现 31 块，失败 0 组
+    3D 终端屏（纹理层，UV 收缩到窗口区，内容驱动尺寸）
+      F:chat tex#67 74–77.2s 399×152     G/L tex#68 88.8–97.6s 467×152    G/R tex#69 88.8–96.2s 626×152
+      H:isolation tex#70 103.6–111.4s 320×152   H:completion tex#71 116.4–118.2s 701×152
+      J tex#72/73/74 130.4–145s 475/475/394×152         正文 minPad 47.7–48 / 24；标题栏 11.1 / 0
+    2D 面板：reconnectBanner 542×99、connReset 520×300、sysPanel 845×540(29.6)、permissionDialog 460×470、
+      warningModal 620×194、lossChart 845×432、loveCode 225×109、nestedWindow 595×47 ×3
+      → 正文 minPad 24 / 24，标题栏 2.3 / 0
+  demo 三块终端屏另测（?demo=panes&shot=2）：w=0.629、uv=[0,1,0.655,1,0,0.762,0.655,0.762]、像素和 5.25M/7.58M/3.75M
+npm run doctor                               → PASS 5 / FAIL 0
+```
+
+### T41 的关键结论
+
+1. **面板尺寸改为内容驱动**：`termpane` 先按 `measureText` 排版 → 窗口 = 内容 + 两侧 24px，画布 ×2（2048×1280），`uv.setXY` 把 UV 收到画布左上角的窗口区；`monitor.fit()` 随 `pane.onResize` 重建机身，屏面与机身不再脱节（旧实现屏面恒 0.96 世界宽、与 shell 宽无关）。
+2. **清晰度**：终端/面板用 `MeshBasicMaterial + toneMapped=false`、`anisotropy 16`、开 mipmap；新增 `PANEL_LAYER=3`，在 post 之后单独渲染 → **不进 bloom / 径向模糊 / 色调映射**。
+3. **倾斜**：termpane drift ≤2.58°/2.01° + 场景基准 ≤2.29° → 合成 ≤4.87° ≤ 6°（h_absence 0.22→0.04、j_overflow ±0.30→±0.04、z_demo_pane ±0.22→±0.04）。
+4. **文字包含自检**新增 `r2 面板包含`（每 0.5s 全片）；`beginPanel/endPanel` 记录每块面板的最小内边距，标题栏用 `pad:0` 的 chrome 作用域豁免。
+5. **修掉的三类越界**：2D 标题栏 0.9px 越界（`textBaseline` middle→top）、`drawCodeBlock` 行号槽越出面板左缘（让出 74.8px）、石碑正文与 permission/warning 面板包围盒相撞（正文 127.0–127.5 退场，因为**文字盒登记与 alpha 无关**）。
+
+## 决策日志（R2：T41 面板）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R2-D1 | 面板字号统一 34px、窗口随内容伸缩，而不是缩字 | §G1 明写「字号 30–40px，窗口放大去适配文字」 | 改回固定窗口 + 缩字 |
+| R2-D2 | 标题栏用 `pad:0` 的 chrome 作用域，外层 24px 只查包含 | 标题栏本身就是面板的内边距区，否则自我冲突 | 删掉 claimed 机制 |
+| R2-D3 | 面板用独立 `PANEL_LAYER=3` 在 post 之后叠加 | §G1「不参与 bloom 与径向模糊」；只置 `userData.noPost` 无法在 composer 内跳过 | 回退 traverse 单行 + 删 `drawPanels()` |
+| R2-D4 | 石碑正文 127.0–127.5 退场 | 文字盒登记与 alpha 无关，127.8 的 permission 面板必然相撞 | 恢复 `span(t,127.45,127.85)` 即复现 |
+| R2-D5 | 非面板浮动小字（12–24px）不在 T41 改 | 属 §2.3「画面内浮动标注」与 §G2 去中文 → T42 范围 | — |
+
+### 仍未完成 / 已知问题（T41 之后）
+
+1. 段 C `t=38.2` 的 stage 层文字重叠（IoU 0.137）→ **T43**。
+2. 非面板浮动标注仍是 12–24px（`f_omnipotent.js:552/566/644`、`i_cleanup.js:273/337/350`、`j_overflow.js:303`、`l_training.js:619`、`n_handoff.js:345`、`h_absence.js:392/478`、`k_storm.js:331/336/1007`）→ **T42**。
+3. 面板文本仍有中文（demo panes、`handoffCard`）→ §G2 / **T42**。
+
+---
+
+## T42 全局规则（FIX_V5 §G2–G6/G9）— 已完成
+
+完成定义是「去中文标签（署名页删 DeepSeek Harness 行）+ 唯一性 / 安全区 / 光敏 / 太阳结构自检」。
+
+```
+node .scratch_layers.mjs scan 0.2         → 1060 帧
+  文字重叠  全片仅 1 帧命中：t=38.2 (C) ×1 stage IoU=0.137「2π = 6.2832」∩「y = sin x」→ 属 T43
+  面板      全片 31 块，失败 0 组（T41 未回退；sysPanel minPad 29.6/24、标题栏 2.3/0）
+node .scratch_layers.mjs gscan 0.2        → 1060 帧 + 6357 亮度帧，327.8s，1920×1080
+  PASS g2  全片除歌词层外无汉字（白名单只有 上善(CC 人名) / 六(K 段六语计数卡)）
+  PASS g3  任一帧都没有重名主体
+  PASS g6  最强 2s 窗口交替 0Hz（上限 2.5Hz，摆幅 0.92087），最坏窗口 144.77–146.77s
+  FAIL g4  4 个拨杆/摇杆：b:pendulum 14.6–18s | b:fourier 18.6–22.4s（段 B → T43）| g:lever 89–103.4s（段 G → T47）
+  FAIL g9  2 个太阳结构：e:orb 64.8–68.2s | segE 69.6–70s（段 E → T45）
+  FAIL g5  1606 帧次越出安全区（已排除歌词层；stage 1419 / unknown 187）
+  · 安全区按段分组（.scratch_safesum.mjs）：C 1、G 6、H 1、I 33、K 50、L 215、M 4、N 22
+npm run doctor                            → PASS 5 / FAIL 0
+```
+
+### T42 的关键结论
+
+1. **G2 落地**：`src/data/dialogue.js` 21 条中文台词全部英文化（`note:`/注释不动），`f_omnipotent.js`（营养标签 / PURR / 三条律条）、`i_cleanup.js:417`（石碑草稿）同步；`n_handoff.js:371–376` 删「界面致敬 DeepSeek Harness」行，另两行署名英文化（CC 专有人名 `上善` 保留）。
+2. **G3 是命名碰撞、不是真重复**：`textPlane`（B 段 3 层视差板、D 段年份环 10 块）、`glowTube`（B 段 2 支）、`termpaneMesh`（J 段 3 屏同显 `#001`）改为逐实例唯一名后 0 重名。
+3. **G4 判据修了 three r180 的参数名**：`CapsuleGeometry.parameters` 用 `height` 而非 `length`，旧实现 `len=0` 直接跳过胶囊 → 段 G 的拨杆（`g_glitch.js:111` 已命名 `g:lever`）此前漏检；现在名字与形状双命中。
+4. **G6 用施密特触发数零穿越**：裸数零穿越会把粒子闪烁算成几十 Hz；实测全片 0Hz、摆幅 0.92（段 G 的 8Hz 配色交替只改色相，未造成整屏亮度交替）。
+5. **段 G 的钟表不是 3D prop**：`clock.js` 的 `sunMoon`（圆盘 + glow）只被 `z_demo_f2b` / props 预览页使用，不在正片渲染树；正片钟表是 `g_glitch.js:167–256` 自建（天空只有两片渐变、无太阳圆盘）→ G9 只由段 E 两处构成。
+
+## 决策日志（R3：T42 全局规则）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R3-D1 | G2 用**文本**白名单（`上善`、`六`），不做整段时间豁免 | 整段豁免会放行该段所有汉字；文本白名单只放行已确认的专有人名/数据卡 | 删 `G2_ALLOW_TEXT` 的两条正则 |
+| R3-D2 | G5 排除 `lyrics` 层 | 字幕贴底是既有设计（bottom 9–15%），不是「舞台文字越界」 | 传 `skipLayers:[]` 即复现 5394 帧次 |
+| R3-D3 | G6 只看摆幅 ≥2% 的交替，且用施密特触发 | 去均值后的裸零穿越把粒子闪烁判成几十 Hz（假 FAIL） | 下调 `hyst`/`minSwing`，或改回裸零穿越 |
+| R3-D4 | G4/G9/G5 的「修」不塞进 T42 | 队列规则 6：全局项只改属于该项的部分；拨杆/太阳/安全区的修复各有段任务 | 在对应段任务修完后，六条自检自然转 PASS |
+| R3-D5 | `textPlane`/`glowTube`/`termpaneMesh` 改成带自增序号的名字 | G3 判据是「按对象名统计」，同文案多面片本是同主体的合法分层 | 去掉 `#N` 后缀即复现 4 组重名 |
+
+### 仍未完成 / 已知问题（T42 之后）
+
+1. `?selftest` 新增的 g4（段 B×2 / 段 G）、g9（段 E）、g5（1606 帧次）**三条 FAIL 是如实上报**：自检没有关闭、六个阈值一个没改，按段归属留给 T43/T45/T47/T48/T49/T51/T52/T53。
+2. 段 C `t=38.2` 的 stage 层文字重叠（IoU 0.137）→ **T43**。
+3. `npm run check` §6「src/ 无歌词原文」FAIL 属**基线既有**：6 处命中全在 `src/scenes/anchors.js:108,115` 的注释里（本轮未动该文件）。
+4. 非面板浮动标注仍是 12–24px（列表见上）——与 G2 无关，属 §2.3。
+
+---
+
+## T43 段 B/C（FIX_V5 §B/C：0:26 / 0:33 / 0:35 / 0:36 / 0:38 / 0:42）— 已完成
+
+完成定义是「六处点名项按 §B/C 落地，且时间段内每 0.2s 文字重叠 0」。
+
+```
+node .scratch_layers.mjs scan 0.2           → 1060 帧
+  文字重叠  全片命中 0 帧（T42 唯一的 t=38.2「2π = 6.2832」∩「y = sin x」已消失）；59.8–62.2s 命中 0
+  面板      全片 31 块，失败 0 组（终端屏正文 minPad 47.7–48/24、sysPanel 29.6/24、标题栏 2.3/0）
+?shot 抽检 errors=0   t=26.5(B) tris=13128 | t=33.6 / 38.2 / 43.8(C) segC tris=1858 / 2966
+对象普查（t=26.5，stage3d 179 个命名对象）
+  segB：formula / formulaRing / pendulum / lorenz / tesseract / mandelbrot / packet / fourier / galaxy /
+        blackhole / waveint / gate×8 / backdrop / shafts / snow / tokensnow / vitrines … 无 heart
+  segC：segC / segC:points / segC:curve / segC:plane / segC:tangents / segC:highlight … 无 ring / ticks / 文字面片
+npm run doctor                              → PASS 5 / FAIL 0
+```
+
+### T43 的关键结论
+
+1. **0:26（段 B 心形）**：`b_dive.js` 的展品槽位 `['heart', 11, …]`、BUILD 分派 `heart: () => buildHeart(renderer)`、`EX_NAMES.heart` 与 `buildHeart()` 整函数（红心 + 心下方 `glowPlane(CircleGeometry(0.17,24))`「扇形」+ `ConeGeometry(0.1,0.55)` 光柱 + `textPlane('♥')`）全部删除；运行时普查确认 `segB` 已无任何 heart 对象。段 M/N 的 `heart3d`（`src/lib/heart3d.js`）是另一条线索（§E/§H），未动。
+2. **0:33（z 轴痕迹）**：2D 测量框整块（`strokeRect` + w/h 尺寸线 + 刻度 + `w = 1.26`/`h = 1.26`）、`this.axes`（两条贯穿轴线的 `segment()` + 两枚 `ConeGeometry` 箭头）与 `labAxis`（x / y / **z** 三个 `textPlane`；'z' 在画面中心、'x' 被右缘裁切）全删；**保留 xy 方格纸 `segC:plane`**（§B/C 明写"只看 xy 平面"，方格纸是它的参照）。
+3. **0:35/0:36（圆与公式）**：删第二个圆 `segC:ring`（`TorusGeometry(R,0.0085,6,200)`）、圆周刻度 `segC:ticks`（`voxelField` 24 格）、圆内 π 读数 `labPi`、2D ② 的单位圆 + 12 刻度 + 半径线 + `r = 1.00`、顶部贴边公式 `labC`（`C = 2πr = …`）、③ 的 `2π = 6.2832` 与 `2πr = …` 两个数字、`labInf` / `labWall`；**圆现在只由点云 `segC:points` 的形变给出**。全段 3D 文字（`labSin`/`labLim`/`labEps`）一并撤掉，画面文字只剩 §B/C 允许的三类：`y = sin x`（一处，44px，24.4% 高度）、切线斜率数字 `k = …`（44px）、末尾 `lim  f(x) = ∞` 与 `ε = 0.09`（**均 84px ≥ 80px**）。
+4. **lim 的 G5 越界**：旧位置 `cy + S*1.22` = 890px = 82.4%（T42 报的 bottom 7.7%）→ 改到 `cy + S*0.78` ≈ 69%，进 8–80% 安全区；ε 标签由 44px 抬到 84px。
+5. **0:38/0:42（各只留一条）**：删 2D ④ 的 96 段正弦路径（留其 `'y = sin x'` 文字）与 2D ⑥ 的 ∞ 曲线（Gerono 120 段 + `'∞'` 字形）→ sin / ∞ 各自只剩 3D `segC:curve` 那一条。③ 的「弧展开成直线段」、2D 切线线段、xy 方格纸保留（前两者是 V4 既有项、后者是第 2 条的依据）。
+
+## 决策日志（R4：T43 段 B/C）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R4-D1 | 删心形时连 `buildHeart` 函数一起删，不留空壳 | 槽位/分派/名字三处都删掉后该函数是死代码，留着易被误认成"还在" | 恢复 PLAN 槽位 + BUILD 分派 + 函数体（注释里记了原实现） |
+| R4-D2 | 0:33 只删"z 轴痕迹"（轴线/箭头/三维字母），**留 xy 方格纸** | 点名的对象是 z 轴与测量框；§B/C 同句要求"只看 xy 平面"，方格纸正是这个参照 | 删 `this.grid` 创建块 |
+| R4-D3 | 顶部贴边公式 `labC` 与圆内 π 读数 `labPi` 一并删，而不是移位 | §B/C 只保留三类文字（sin / 切线斜率 / lim·ε），其余"公式标签"整类不许出现 | 从注释恢复 `labC`/`labPi` 创建块 |
+| R4-D4 | lim 抬到 `cy + S*0.78`、ε 同步放大到 84px | 旧位置 82.4% 越出 G5 安全区（T42 实测），§B/C 要求 lim/ε ≥80px | 改回 `S*1.22` / `ANNO_PX` |
+| R4-D5 | 2D 正弦/∞ 的**曲线路径**删、其**文字**留 | §B/C 说的是"曲线只留一条"；`y = sin x` 是明确保留的文字 | 恢复 ④ 的 96 段与 ⑥ 的 120 段绘制 |
+| R4-D6 | 段 B 的 `b:pendulum` / `b:fourier` 不动几何、**也不改 `leverModels` 判据** | 它们在 0:14.6–0:22.4（不在本题六个时刻内），是双摆/傅里叶本轮的"杆+球"而非开关拨杆；改判据等于放宽 G4 门槛 | — |
+
+### 仍未完成 / 已知问题（T43 之后）
+
+1. `?selftest` 的 g4（段 B×2 / 段 G）、g9（段 E）、g5 三条 FAIL 仍在：**自检没关、阈值一个没改**，按段归属留给 T45/T47/T48/T49/T51/T52/T53。
+2. g4 的段 B 两项是**探针假阳性**（双摆/傅里叶的杆+球），本轮刻意不改判据、也不改几何，等 §G/T47 按 §G 的开关形态统一判定；段 G 的真拨杆 `g:lever`（`g_glitch.js:111`）留给 T47。
+3. `b)` 画面密度 12/213 帧、`r)` 段 K 重叠仍是既有 FAIL；`npm run check` §6 的 6 处命中仍全在 `src/scenes/anchors.js:108,115` 注释里。
+4. 全片导出未跑（≈31.3 分钟），留到 T55 终验。
+
+## T44 段 D（FIX_V5 §D：0:51 旋涡 / 0:52 隧道性能 / 0:57 深度）— 已完成
+
+完成定义是「三处点名项按 §D 落地，且时间段内每 0.2s 文字重叠 0、errors=0」。
+
+```
+node .scratch_layers.mjs scan 0.2           → 1060 帧
+  文字重叠  全片命中 0 帧；59.8–62.2s 命中 0      （out/t44/scan_final.log）
+  面板      全片 31 块，失败 0 组
+node .scratch_t44.mjs 51.6,52.75,57.2,58.85,58.98
+  每帧(含 gl.finish) mean 3.6–9.5ms；errors=0；真 GPU = ANGLE AMD Radeon D3D11
+  px.mean/lit  51.6 0.2316/1.00 | 52.75 0.2347/1.00 | 57.2 0.1604/1.00 | 58.85 0.1053/0.66 | 58.98 0.0201/0.09
+  G8  12 张 dTunnelYear 图集纹理 material.map.version = 2 → 60 帧后仍 = 2；可见标签 0 → 11
+node .scratch_g2diag.mjs                    → 非歌词汉字 1 处（段 H 158.8s 的 "六"，非本轮）
+                                              安全区越界点 331 处，**56–59s 一条都没有**
+npm run doctor                              → PASS 5 / FAIL 0
+```
+
+### T44 的关键结论
+
+1. **0:51 旋涡** = `src/lib/swarm.js` 的 `layoutSwirl()`（臂式对数螺线，`r0=0.34` 留中心黑孔）+ `SEGMENT_SWARM.D`(48.6→52.4) + `SPIN.D`（`spinAngleAt()` = rate·x + ½·accel·x²，0.9→3.4 rad/s、累计≈10 rad）+ 顶点着色器 `uSpin`；`d_switch.js` 的 `dizzyRings`（14 × `TorusGeometry` 白色细线环）创建块与渲染块整块删除；青/洋红双重影 = `src/core/post3d.js` 的 `uDouble`（`d_switch.js` 写 `ctx.post`，`main.js` 的 `renderThree` 转发）。
+2. **49.0–51.6 的黑不是空屏**：是段 D 自己的 2D 眼睑（`d_switch.js` 的 `drawEyelids`，睁眼窗口 **50.435–51.635**）盖住全屏。决定性实测：t=49 时 WebGL 画布 mean **0.2199 / lit 1.00**，而合成后的 `#stage` 只有 **0.0298 / 0.0025** —— 蜂群画得好好的，被盖住了。所以旋涡的成形窗改成「**在眼睑后面成形**」（48.6→52.4），睁眼时看到的就是成形旋涡，且收口早于 52.77 的隧道入口 0.37s。（此前几轮"提前成形"的猜测已全部回退。）
+3. **G8**：年份数字从 `textPlane`（每帧重画 canvas + `tex.needsUpdate = true`）换成新建 `src/lib/digitAtlas.js` 的预渲染图集（8 × 256px = 2048 宽）+ `digitLabel`（几何在构造期定死、每帧只写 uv 属性）；证据是 12 张标签的图集纹理 `version` 在连续 60 帧里**不增长**（没有每帧重传纹理），旧路径下界 0.16–0.43 ms/帧（12 块 1024×256 canvas 重画，不含 GPU 上传）。
+4. **0:57 深度**：`uDepth = span(t, 57.417, 58.89)`（`deeply1.t` → `deeply2.t + 0.6`）、`depthM = round(10935·uDepth/5)·5`，58.89 到顶 10935 m（下一帧 58.90 起黑场）；2D 层右下 150px 大数字 + `drawDepthRuler()`（尺身 94.5%W、14–60%H、250/1000 m）；随深度渐暗 `rgba(2,7,13, 0.3·uDepth)`；18 颗生物荧光点（`glowDotTexture()` + `Points`）；气泡改 `LineSegments`。
+5. **G5**：深度数字包围盒 `(1368, 725, 450×174)` → x∈[71.2%, 94.7%]、y∈[63.7%, 79.3%]；基线取 **74%** 而不是 78%，因为 G5 判据（`src/ui/globalrules.js:81-105`）用的是登记包围盒、盒底 = 基线 + 0.38·px，78% 会让盒底落到 83.2%（bottom 越界 3.2%）。
+
+## 决策日志（R5：T44 段 D）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R5-D1 | 旋涡用蜂群（`layoutSwirl`）实现，不重建一圈细线环 | §D 明写「不要白色细线团」；细线环正是被点名的旧路子 | 恢复 `d_switch.js` 的 dizzyRings 创建/渲染块（注释里留了原样） |
+| R5-D2 | 成形窗 49.2–52.7 → **48.6–52.4** | 实测睁眼窗口 50.435–51.635：旋涡要在眼睑后面成形、并在 52.77 入口前收口 | 改回 `SEGMENT_SWARM.D.t0/t1` 与 `SPIN.D.t0/t1` |
+| R5-D3 | 自转角用 `rate·x + ½·accel·x²`（x 从窗口起点算），**不是** t·ω(t) | 后者 x = t 时导数被 t≈50 放大 → 旋涡乱转 | 改 `spinAngleAt()` 公式 |
+| R5-D4 | 年份数字改 `digitAtlas` + 每帧只写 uv | §G8 明写「数字做成预渲染图集，不得每帧重绘文字纹理」 | 换回 `textPlane` 年份牌 |
+| R5-D5 | 2D 舞台文字（深度数字/刻度数字）用裸 `fillText` + 显式 `checkSize` | `text()` 会被 `markScreenContext` 双重登记（role+raw、同矩形 IoU=1）→ 全片扫描报出段 D 9 帧**假重叠**；全片其它 2D 舞台文字（`c_define.js:1014,1040,1060,1062`）本来就是裸 fillText | 换回 `text()`（假重叠会回来） |
+| R5-D6 | 深度数字基线 78% → **74%** | G5 用登记包围盒，盒底 = 基线 + 0.38·px；78% ⇒ bottom 3.2% 越界 | 改回 `H*0.78` |
+| R5-D7 | 段 D 蜂群 alpha 0.18 → **0.42** | §D 要求「要有色彩与层次」；0.18 在截图里几乎看不见旋涡 | 改回 `SEGMENT_SWARM.D.alpha` |
+
+### 仍未完成 / 已知问题（T44 之后）
+
+1. `?selftest` 的 g4（段 B×2 / 段 G）、g9（段 E）、g5（其余段）FAIL 仍在：**自检没关、阈值一个没改**，按段归属留给 T45/T47/T48/T49/T51/T52/T53。本次 `g2diag` 的 331 处安全区越界点里 56–59s（段 D）**一条都没有**。
+2. `g2diag` 新暴露 1 处非歌词汉字 `"六"`（158.8–161.6s，段 H，34px，同时 right 0.9% 越界）→ 段 H/T48 范围，本轮未动（`.scratch_g2diag.mjs` 与 `?probe=global` 的 g2 口径不同，T42 当时报 PASS，留 T48 一并核）。
+3. 段 D 44–47s 的蜂群 alpha 提升只做了 px.mean 记录，**未跑全量自检**（未验证项）。
+4. 全片导出未跑（≈31.3 分钟），留到 T55 终验；`.scratch_*` 探针脚本仍是临时文件（gitignore）。
+
+## T45 段 E（FIX_V5 §E：1:05 删太阳 / satisfaction 改 3D 奖励曲线）— 已完成
+
+完成定义是「§E 唯一一条落地，且 G9 在全片归零、段内每 0.2s 文字重叠 0、errors=0」。
+
+```
+node .scratch_g9.mjs 64.7,65.7,66.6,69.6,69.8,70   → 修前：e:orb kids=14 disc=2 rays=12；segE kids=28 disc=2 rays=14
+                                                      修后：e:orb=false；e:reward kids=4；segE kids=15；全部 byName=[] byStruct=[]
+node .scratch_t45.mjs 64.7,65.4,65.7,66.6,67.267,67.5,68
+  每帧(含 gl.finish) mean 4.2–9.0ms（极值 2.3/10.8）；errors=0；真 GPU = ANGLE AMD Radeon D3D11
+  onT=[65.4,67.267]；u = 0/0.5/0.58/0.82/1.0/1.0/1.0；揭示顶点 0/96/112/158/192/192/192
+  px.mean/lit 64.7 0.1636/1.00 | 65.7 0.1462/0.92 | 66.6 0.1111/0.67 | 67.267 0.0678/0.38 | 68.0 0.1381/1.00
+node .scratch_layers.mjs scan 0.2                   → 1060 帧；文字重叠 全片命中 0 帧；面板 31 块/失败 0 组
+node .scratch_layers.mjs gscan 0.2                  → 1060 帧/328.5s：g9 PASS、g2/g3/g6 PASS；g4 FAIL 4 处；g5 FAIL 1604 帧次（最早一条 92.4s）
+npm run doctor                                      → PASS 5 / FAIL 0
+```
+
+### T45 的关键结论
+
+1. **删太阳** = 删 `e_deal.js` 的 `buildRewardOrb()` 整函数（`e:orb`：`SphereGeometry(0.16,24,18)` 宝珠 + `SphereGeometry(0.3,20,14)` 光晕 + 12 × `ConeGeometry(0.013,0.42,6)` 放射锥）连同创建处、渲染块、`metrics.orb`、`dispose()` 项，整段替换为 `buildRewardCurve()`。
+2. **新曲线在结构上不可能命中 G9②**：`object` 是 `Group name='e:reward'`，**只有 4 个子节点**（96 点阶梯折线带 / 渐变填充带 / 线头 `Sprite` / 72 粒 `Points` 尾迹），没有任何 `Circle|Ring|Sphere|Icosahedron|Cylinder` 几何。§E 的六项也逐条兑现：随起音攀升、线头亮点 + 粒子尾迹、下方渐变填充、相机横移（rig 既有）、金→白（`white` 0→0.98）、无圆盘形主体。
+3. **G9 的第二处 FAIL 是 `segE` 自己的直接子节点**：14 格奖励条（`BoxGeometry`）+ 2 圈冲击波（`RingGeometry`）同帧可见 ⇒ 把奖励条挂进新的 `e:bars` 组（单位变换，世界位置逐像素不变）。修后全片 gscan **g9 PASS**（修前 65.7/66.6 与 69.6/69.8 两段 FAIL 全消失）。
+4. **攀升由起音驱动**：`ctx.sync.onsetsIn(tSat-0.9, tHappy+0.6)` 返回 **`{t,s}` 对象数组**（`src/core/sync.js:126-129`，`h_absence.js:200` 早有注释），第一版当数字数组用 ⇒ `nextOn-prevOn = NaN` ⇒ `u = NaN` ⇒ 折线全 α=0（`metrics.reward.u` 序列化成 `null`、`revealed=0`）；改成取 `o.t` 后 `u = (beats+frac)/起音数` 才正确。
+5. **线头取景**：`REW_X1=0.62` + 组偏移 `+0.42` 时线头世界 Δx≈1.04、NDC 0.954，加辉光被右边缘裁掉；收敛到 `REW_X1=0.54`、偏移 `+0.28`（Δx≈0.82 → NDC≈0.75 ≈ 屏 x 1682px，辉光也在画面内）。
+
+## 决策日志（R6：T45 段 E）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R6-D1 | 用 `Mesh` 折线带 + 填充带 + `Sprite` 线头 + `Points` 尾迹实现奖励曲线，**不用**任何球/圆盘/锥 | §E 明写「不得有圆盘形主体」，且 G9② 正是抓「球/圆盘 + 放射锥」结构 | 换回 `buildRewardOrb()`（函数上方注释留了原样说明） |
+| R6-D2 | 阶梯用 8 级 `rewardStair(s)`（每级前 45% 线性上升、其后平台） | §E 要「随每个起音点向右上攀升」的台阶感，不是平滑直线 | 改 `REW_STAIRS` / `rewardStair()` |
+| R6-D3 | 攀升进度 = 起音数 + 拍内小数（`u=(beats+frac)/onsets`） | 每拍应有一段可见爬升，而不是瞬时跳变到满格 | 改渲染块里的 `u` 计算 |
+| R6-D4 | 14 格奖励条搬进 `e:bars` 组 | G9② 只看直接子节点；奖励条本来就不是放射线，父子结构如实表达即可，且不改判据 | 把 `this.barGrp.add(m)` 改回 `this.grp.add(m)` |
+| R6-D5 | 线头横向收进 `REW_X1=0.54` + 组偏移 `+0.28` | 原参数下线头本体 + 辉光被右边缘裁切 | 改回 `REW_X1=0.62` / `+0.42` |
+| R6-D6 | 判据文件 `src/ui/globalrules.js` 一个字不动（连 `:198` 的陈旧注释也不改） | 改判据/阈值文件 = 有放宽门槛的风险；陈旧注释不影响判据 | — |
+
+### 仍未完成 / 已知问题（T45 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 4 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s、`g:lever` name+capsule 89–103.4s）与 **g5 FAIL 1604 帧次**（最早一条 92.4s ⇒ 59–74s 段 E 零越界点）：自检没关、阈值一个没改，按段归属留 T47/T48/T49/T51/T52/T53。
+2. `src/ui/globalrules.js:198` 注释仍写「② 抓 e_deal 的 `e:orb`」（对象已不存在）——故意不改，避免动判据文件；下次允许动该文件时顺手更新。
+3. 段 E 未跑全量 `?selftest`（只跑定点 + 全片 gscan/textscan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；`.scratch_*` 探针脚本仍是 gitignore 的临时文件（本轮新增 `.scratch_g9.mjs`、`.scratch_t45.mjs`）。
+
+---
+
+## T46 段 F（FIX_V5 §F：1:14 终端清晰度 / 1:18 删发光指标条 / 1:27 删中文石碑）— 已完成
+
+完成定义是「§F 三条落地，且时间段内每 0.2s 文字重叠 0、面板失败 0、errors=0」。
+
+```
+node .scratch_t46.mjs 74.5,77.6,80.6,83.8,86.6,87.3,88.0
+  真 GPU = ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11)
+  termpaneMesh:#001#1  tex=2048×1280 aniso=16 toneMapped=false noPost=true（全部采样点）
+  winW   320(74.5,MIN_W) / 691 / 700 / 700 / 700 / 497 / 497
+  上屏   [281,143] / [671,447] / [700,458] / [713,460] / [727,462] / [529,464] / [529,463]
+  box 左缘 66/45/36/28/23/22/22px（都不出画）；右缘 ≤750px；中心 ≤0.201 ≤0.22；面积 ≤16% ≤22%
+  tilt  6.86/4.07/3.64/2.67/1.81/1.77/1.74°（= 相机朝原点偏航，同帧所有面板同值）
+  每帧(含 gl.finish) mean 2.3–5.7ms；errors=0；纹理内文字审计 39–44 块失败 0、违规 0
+node .scratch_layers.mjs scan 0.2    → 1060 帧；文字重叠 全片命中 0 帧；面板 31 块/失败 0 组
+node .scratch_layers.mjs gscan 0.2   → 1060 帧/328.5s：g2/g3/g6/g9 PASS；g4 FAIL 4 处；g5 FAIL 1604 帧次（最早 92.4s）
+npm run doctor                       → PASS 5 / FAIL 0（b1 75 文件 / b2 74 模块 / c 140 文件）
+```
+
+### T46 的关键结论
+
+1. **"模糊"的根因不是材质/纹理/后处理**：面板一直满足 §G1 的硬件面（2048×1280 贴图、aniso 16、`toneMapped:false`、`noPost`、不进 bloom/径向模糊），真正的病是**逻辑→屏幕的固定比例**：上屏 px = `34(逻辑) × SCALE(2) × (0.96/2048) × scale × pxPerWorld(≈531)` = **16.9 × scale**；默认 scale=1 ⇒ 34px 逻辑字只有 **≈17px** 上屏。修法两条同时上：窗口宽封顶（`termpane.js` 新增 `maxWinW`/`WIN_CAP`，F 段传 700 ⇒ 正文预算 700−48−236=416px，字号仍是 34px）+ 整机 `scale=2` ⇒ 上屏 ≈**34px**，落进 §G1 的 30–40px。
+2. **`src/lib/props/monitor.js` 的真 bug**：它头注释承诺「屏面永远填满玻璃」，但 `initW/initH` 与 `fit()` 读的是 `pane.worldW/worldH` —— TermPane **只暴露 `get width`/`get height` 取值器，没有 `worldW/worldH` 属性** ⇒ 恒 `undefined` ⇒ 机身永远按 0.96×0.6 建、内容窗口再小也不收（屏上就是"小屏浮在大框里"）。改读 `pane.width/height` 后机身随内容收放。
+3. **取景改按屏幕左缘锚定**：原定位 `cam.x − 0.86·halfW0`（固定 NDC）在段 F 相机横移（x 0.395→0.003）与偏航（6.86°→1.74°）下漂移 ≈0.21，放大 2× 后左缘掉出画面（实测 box 左缘 −41/−100/−55px）。改为 `target = −1 + 2·28/W + (paneW/2)/halfW0` + `v.project(cam)` 一步线性修正 ⇒ 左缘恒 22–66px。**顺序**：必须先 `updateChatPane()` 再定位（定位要读本帧 `chatPane.width`）。
+4. **终端内容改由 dialogue 驱动**：`updateChatPane()` 从"硬编码三行中文、只在 eggplant 拍刷新"改成 `dialogueOf('F')` 按 `ctx.cues.sec('F', anchor, parseFloat(note)) + offset` 逐行出现、render 最前每帧刷新（旧实现 77.7s 之后永不更新，营养/抗氧化/律条行根本不会出现）。工具行文本里去掉自带的 `⚙`（`ROW_STYLE.tool.prefix` 已经加一个，屏上原来是双字形 `⚙ ⚙`）。删 `→ author: you` 行以适配 7 行窗口（`setLines` 超 7 行只保留最后 7 行）。
+5. **删掉的两件旧道具**：`drawEmojiMetrics()`（两条 `roundRect` 发光指标条 + `dietary fiber`/`potassium`）与 `drawSystemTablet()`（金边中文大框石碑）；system 提示改由终端 `cat system_prompt.md` + 三条英文律条承担，`SYS_LINES` 保留给 `drawRoseWindow` 取行宽。
+
+## 决策日志（R7：T46 段 F）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R7-D1 | 「收窄窗口 + 放大整机」而不是缩字或换更大字号 | §G1 明写「字号 30–40px，窗口放大去适配文字，不得缩小字号」；且 `PX2WORLD` 固定，只放大窗口改不了比例 | 改回 `maxWinW` 默认 + `scale 1` |
+| R7-D2 | `maxWinW` 做成 `termpane` 的选项（默认 PANE_W），只 F 段传 700 | 其它段的窗口行为必须零变化（各段有自己的排版预算） | 删 `maxWinW` 选项 |
+| R7-D3 | 修 `monitor.js` 读 `pane.width/height`（真 bug） | 机身 0.96×0.6 固定的根因就是坏读数；该文件注释本来就承诺跟随内容 | 改回 `pane.worldW`（退回"小屏浮在大框里"） |
+| R7-D4 | 定位改「屏幕左缘锚定 + 一步线性修正」 | 固定 NDC 在相机横移/偏航下漂移 0.21，放大 2× 后必然出画 | 改回 `cam.x − 0.86·halfW0` |
+| R7-D5 | `updateChatPane` 从 `dialogueOf('F')` 行驱动、每帧刷新 | 旧实现硬编码中文且只在 eggplant 拍刷一次 ⇒ §F 的英文行永远不出现 | 恢复硬编码 `rows` 与单点调用 |
+| R7-D6 | 工具行去掉文本里的 `⚙`，保留 `ROW_STYLE.tool.prefix` | 两个 ⚙ 是重复前缀（H 段既有风格靠 ROW_STYLE），不是内容 | 把 `⚙ ` 写回 `dialogue.js` 行首 |
+| R7-D7 | 判据文件 `src/ui/globalrules.js` 一个字不动 | 改判据/阈值 = 放宽门槛的风险；本轮判据结论全部如实上报 | — |
+
+### 仍未完成 / 已知问题（T46 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 4 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s、`g:lever` name+capsule 89–103.4s）与 **g5 FAIL 1604 帧次**（最早一条 92.4s ⇒ 74–88.8s 段 F 零越界点）：自检没关、阈值一个没改，按段归属留 T47–T53。
+2. `src/ui/globalrules.js:198` 注释仍写「② 抓 e_deal 的 `e:orb`」（对象已不存在）——同上，故意不改。
+3. 段 F 未跑全量 `?selftest`（只跑定点 + 全片 gscan/textscan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；`.scratch_*` 探针脚本仍是 gitignore 的临时文件（本轮新增 `.scratch_t46.mjs`）；`tools/export_mp4.mjs`（T40 交付物）等改动仍**未提交**（`git status` 有 src/、docs/、FIX_V5.md 修改与未跟踪文件）。
+
+---
+
+## T47 段 G（FIX_V5 §G：1:29 四种开关 / 1:33 笼崩断 / 1:34 2D 钟表 / 1:40 恍惚）— 已完成
+
+完成定义是「§G 四条落地，且时间段内每 0.2s 文字重叠 0、面板失败 0、errors=0」。
+
+```
+node .scratch_t47.mjs 89,90.6,93.6,95.5,98.4,101.5,102.3
+  真 GPU = ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11)
+  g: 对象 = []、段 G 几何 = []（3D 摇杆 / 贯穿黑条 / 3D 钟表 / ghost 分身全部消失）
+  metrics  89 sw={capsule,u:0.531} flips=1 | 90.6 seesaw u=0.604 flips=2 | 93.6 cage={u:0.813,a:1,lines:9}
+           95.5 clock{T:1140, ratio:0.083333, dayness:0} | 98.4 button u=1 flips=4
+           101.5 trance={a:1, ghost:0.45, pal:1, hz:2}
+  终端     左缘 0.014–0.022 / 右缘 0.981–0.986（屏缘 28px 锚定）；material.opacity 恒 1
+  每帧(含 gl.finish) mean 3.0–6.9ms；errors=0；违规=0；纹理内文字审计 37–43 块失败 0
+  2D 文字  实测盒 x 0.381–0.619 / y 0.241–0.773，全在 G5 安全区（x∈[5%,95%]、y∈[8%,80%]）
+node .scratch_layers.mjs scan 0.2    → 1060 帧；文字重叠 全片命中 0 帧；面板 31 块/失败 0 组
+node .scratch_layers.mjs gscan 0.2   → 1060 帧：g2/g3/g6/g9 PASS；g4 FAIL 2 处（只剩段 B）；g5 FAIL 1579 帧次（最早 106.4s）
+npm run doctor                       → PASS 5 / FAIL 0（b1 75 文件 / b2 74 模块 / c 140 文件）
+```
+
+### T47 的关键结论
+
+1. **`g:lever` 与段 G 的两项 g4 命中一起归零**：G4 的第二条判据抓的就是 `g_glitch` 那个未命名摇杆（`CapsuleGeometry`+球），本次整段重写后 `stage3d` 里段 G 的 `g:` 对象与 `g:` 几何都是空数组，全片 gscan 的 g4 只剩段 B 的 `b:pendulum`/`b:fourier` 两项（属 T43/T47 之外的遗留）。
+2. **层序陷阱（本次最坑）**：2D 的 `stage` 层是叠在 3D 画布**之上**的，而带 `userData.noPost` 的终端屏走 3D 画布内的 **PANEL_LAYER pass** ⇒ 任何"全屏 2D 底色"都会把终端整块盖掉。实测 95.5s（clockA=1）两块终端**完全不可见**、94.6s（clockA=0.893）只剩 ~10%。修法：天空照旧全幅画，再用 `globalCompositeOperation='destination-out'` + 左右侧带羽化渐变把 **2D 层**擦成透明（擦除只影响本层像素，下层 3D 照旧透出）；擦除带 0–0.198W / 0.802–1W 全擦、到 0.30W 羽化完，正好覆盖终端占位（0.014–0.19 与 0.815–0.986）。
+3. **2D `fillText` 的文字盒确实会被自动登记**：`window.__app.textBoxes()` 在 94.6/95.5 报出 `12`/`3`/`6`、96.8 报出 `A`/`B`（layer 全是 `stage`），实测盒与脚本按公式复算逐位一致（`12` x 0.489–0.511 / y 0.241–0.282）。所以 R5-D5 那条"用裸 `fillText` + 显式 `checkSize`"的理由是**避免 `text()` 的双重登记（假重叠）**，不是"不登记"；G5 依旧能抓到本段的 2D 文字，实测全部落在安全区内。
+4. **取景一律按屏幕缘锚定**：段 G 的相机在 88.8–103.5 横移，老的 `cam.x ∓ 0.86·halfW0` 会让左终端左缘出画 ≈100px（93.3/94.6 实测被切）。改成"先按老公式取初值 → `v.project(cam)` → 按屏缘 28px 的目标 NDC 做一步线性修正"，实测左缘 0.014–0.022、右缘 0.981–0.986，两块终端全程不出画。
+5. **窗口与 2D 主体的横向占位不抢位**：笼崩断 0.42W、胶囊/按钮 0.42W、钟表 r=0.27H、恍惚 ±0.27W（分身 ±0.052W）都在中带；两块终端占 0–0.19 / 0.815–1，互不重叠。
+
+## 决策日志（R8：T47 段 G）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R8-D1 | 整段重写为 2D 矢量，不保留任何 3D 开关 | §G 1:29 明写删 3D 大摇杆、1:40 明写删蓝/橙摇杆；G4 同时禁杆状 3D（两者都靠删几何根治，不改判据） | `git checkout` 恢复 `g_glitch.js` |
+| R8-D2 | 四种开关外廓取 `SW_FRAC = 0.42`（规格下限 ≥35%） | 留 7% 余量，避免相机近似/窗口缩放让它掉到下限之下 | 改 `SW_FRAC` 常量 |
+| R8-D3 | 笼崩断做成"网格弓成飘带 + 火花"（2D、无文字） | §G 1:33 原文要求飘带四散与火花粒子、明确不使用文字 | 删 `drawCageBreak()` 调用 |
+| R8-D4 | 终端在场窗口从 99.5 延到 103.1（坍缩前） | 否则 §3 的 trance1 残影行 `output slowing down…`（101.673）永远不会显示 | 改回 `99.5` |
+| R8-D5 | 天空保持全幅 2D 渐变 + `destination-out` 擦左右侧带 | 既满足 §G 1:34 的"背景天空渐变"，又保住 §G1 的终端清晰度 | 去掉擦除（终端被盖住）；或改回 3D 天空面 |
+| R8-D6 | 终端内容改由 `dialogueOf('G')` 逐行镜像 | 文件里硬编码的中文 `都行，听你的。`/`一整天过去了。` 是 T42 英文化残留，且不随台词表走 | 恢复硬编码 `rows` |
+| R8-D7 | 判据文件 `src/ui/globalrules.js` 一个字不动 | 改判据/阈值 = 放宽门槛（本轮 g4/g5 结论全部如实上报） | — |
+
+### 仍未完成 / 已知问题（T47 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s）与 **g5 FAIL 1579 帧次**（最早一条 106.4s，属段 I ⇒ 段 G 零越界点）：自检没关、阈值一个没改，按段归属留 T48–T53。
+2. `src/ui/globalrules.js:198` 的注释仍写「② 抓 e_deal 的 `e:orb`」、`:200-228` 附近仍把 g4 第二条指向段 G 的摇杆（对象都已不存在）——同上，故意不改。
+3. 段 G 未跑全量 `?selftest`（只跑定点 + 全片 gscan/scan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；本轮新增 `.scratch_t47.mjs`（gitignore 临时探针）；`src/scenes/g_glitch.js` 等改动仍**未提交**。
+
+## T48 段 H（FIX_V5 §H：1:51 右侧窗口 / 1:53 短报错 + 立绘同侧 / 1:57 左侧黑框 / 1:58 立体三角形碎片）— 已完成
+
+范围 103.5–118.3s。**关键前提**：段 H 立绘**全程在场**，`standRect` 实测占 **x 0.591–0.909 / y 0.15–1.17**（`src/whale/sprite.js:127`）⇒ 按 G1 第 9 行「立绘出场时同侧不放面板」，本段所有面板必须走**左带**。改的文件：`src/scenes/h_absence.js`、`src/scenes/i_cleanup.js`、`src/data/dialogue.js`。**判据/阈值一个字未改**（`src/ui/globalrules.js` 未编辑）。
+
+### 改了什么
+
+| §H 项 | 改前（实测基线） | 改后（实测） |
+| --- | --- | --- |
+| 1:51 右侧窗口 | `H:completion` 屏 `fontPx 15.7`、右带压在立绘身上（`cam.x + 0.86·halfW0`） | 左带 + **屏缘 28px 锚定** + `scale 2.2`：`fontPx 35.0–36.4`、左缘 0.024–0.026、右缘 ≤0.331、cx 0.111–0.179 |
+| 1:53 重连内容 | `drawAttempt` k===2 画「`last active N minutes ago`」+「`(timer still counting)`」，横幅从 `W*0.52` 起（文字盒 x 0.533–0.724＝压在立绘身上） | 换成短报错 **`reconnect 3/5 · ack timeout`**；横幅起点 `W*0.07`（文字盒 x 0.07–0.29）；`dialogue.js` left3 行的 `last seen 5 min ago` 同步改掉 |
+| 1:57 左侧黑框 | `H:isolation` 屏左缘 **−0.153（出画 294px）**，只剩半块字（截图里读作 "ffline · waiting…"） | 同一套锚定 + `scale 1.15`：左缘 0.022、右缘 0.204、`fontPx 37.1`、tilt 2.29°，`⚙ idle · peer offline · waiting…` 完整可读 |
+| 1:58 立体三角形 | `segI` 的 `TetrahedronGeometry(0.05)`×240 + `BoxGeometry`×80（+两盏 DirectionalLight）约 118.6–123.2s 从画面中间炸开 | **整块删除**（含 `shardData`/`_iM/_iQ/_iC` 与逐片驱动/扫描线块）：全采样点 `四面体=0`、`I.metrics.shards=0` |
+| 顺带（G5） | 波形说明 `input waveform · real spectrum` 画在 (60, H*0.90)＝x 0.031 / y 0.891，**是本段自己的 g5 越界点（全片最早 106.4s）** | 移到 (0.06W, 0.13H)、字号 12→34px：实测盒 x 0.06 / y 0.105 ⇒ **g5 最早越界点 106.4s → 119.2s（段 I）** |
+
+### 证据
+
+```
+定点（真 GPU ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 …)） node .scratch_t48.mjs 106.4,110.5,111.3,113.9,114.2,117.3,118.8
+  每帧(含 gl.finish) mean 3.8–13.1ms；errors=0；违规=0；纹理内文字审计 36–39 块失败 0
+  补全屏 110.5 winW 324 fontPx 35.0 left 0.024 right 0.198 cx 0.111 / 111.3 winW 548 fontPx 36.4 left 0.026 right 0.331 cx 0.179（rows=2, accepted）
+  孤立屏 117.3 winW 320 fontPx 37.1 left 0.022 right 0.204 cx 0.113 tilt 2.29°
+  重连    113.9 文字盒 reconnecting…  3/5 @x0.083 + reconnect 3/5 · ack timeout @x0.07,y0.296
+  碎片    118.8 四面体=0 段I立方体=0 段I实例总数=0；I.metrics={"shards":0,...}
+node .scratch_layers.mjs scan 0.2   → 1060 帧；文字重叠全片命中 0 帧；面板 31 块/失败 0 组（含 reconnectBanner 542×99 minPad 24/24、termpane:#001[116.4–118.2] 320×248 minPad 48/24）
+node .scratch_layers.mjs gscan 0.2  → g2/g3/g6/g9 PASS；g4 FAIL 2 处（只剩 b:pendulum 14.6–18s、b:fourier 18.6–22.4s）；g5 FAIL 1527 帧次（最早 119.2s＝段 I）
+npm run doctor                      → PASS 5 / FAIL 0（b1 75 文件 / b2 74 模块 / c 141 文件）
+```
+
+### T48 的关键结论
+
+1. **两块屏的病根与段 F/T46 同族**：`termpane` 的 `PX2WORLD = 0.96/PANE_W` 是固定的 ⇒ **上屏字号与逻辑窗口宽无关**，只由"到相机的距离 × 整机 scale"决定。所以要么放大整机、要么拉近；改字号或改窗口宽都救不了清晰度。
+2. **可复用的修法**：新增 `placePaneLeft(mon, pane, ctx, W, {margin,dy,dist})`（先摆近似位 → `project(cam)` → 按屏缘目标 NDC 一步线性修正），把"不出画 + 不压立绘 + 落左带"三件事一次解决；段 F/G 之前是各自手写的同款代码，后续段可继续复用。
+3. **窗口宽封顶是入带的必要条件**：只锚左缘而不封顶，屏会随内容变宽（基线 117.3 的 `winW 701`）把中心推到 **cx 0.23 > 0.22**（会命中 stage_role 的 `pane-zone`）。加 `maxWinW 560/520` 后中心回到 0.111–0.179；文字按 24px 内边距换行、窗口长高（≠缩字号），正是 G1 要的"窗口放大去适配文字"。
+4. **§H 1:58 ≠ §I 1:59**：用户点名的"三角形/实例化碎片"是 `segI` 的 240 个四面体（`InstancedMesh` + 从中心炸开＝"从画面中间冒出"）；而 §I 1:59 要的"上下文碎片"是 **2D 的 token 片**（`drawCompaction` / `this.cells`），两者不是一件事，后者保留。
+5. **本段自己就是 g5 的最早越界点**：`input waveform · real spectrum` 那行 12px 小字同时破了 x 与 y 两条下限，修正后全片 g5 最早点直接后移到段 I（119.2s）——即 T47 遗留清单里"g5 最早 106.4s"一条已随 T48 关闭。
+
+## 决策日志（R9：T48 段 H）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R9-D1 | 连碎片的**两盏 DirectionalLight 一起删** | 那两盏灯只为 320 片碎片打光（`grp` 随 `alive` 才可见）；留着会白占照明预算并改变此后各段/蜂群的亮度 | 恢复 `i_cleanup.js` 的 `grp` 块 |
+| R9-D2 | 保留 2D「上下文碎片」token 场 | §H 1:58 要删的是 3D 实例化碎片，§I 1:59 的 2D 上下文碎片是另一件事，删了会破 §I | 无需回退（未动） |
+| R9-D3 | 段 H 两块终端屏全部移到**左带** | 立绘全程占右带 0.591–0.909；G1 第 9 行禁止"立绘出场时同侧放面板" | 恢复 `cam.x ± 0.86·halfW0` |
+| R9-D4 | 窗口宽封顶 `maxWinW 560`(completion)/`520`(isolation) | 不封顶则屏宽随内容增长、锚左缘后中心越 0.22（`pane-zone`）；封顶后靠换行长高，符合 G1"窗口放大适配文字" | 去掉 `maxWinW` |
+| R9-D5 | 整机放大 `scale 2.2`/`1.15` | 唯一能让上屏字号进 30–40px 的手段（见关键结论 1） | 改 `scale` 常量 |
+| R9-D6 | 第 3 次重连改短报错 `reconnect 3/5 · ack timeout` | §H 1:53 原文点名删「last active … ago」并给了 `reconnect 3/5 · timeout` 的示例；与 5/5 的 `timeout` 区分开用 `ack timeout` | 恢复 `drawAttempt` k===2 的 `mins` 版本 |
+| R9-D7 | 判据文件 `src/ui/globalrules.js` 一个字不动 | 改判据/阈值＝放宽门槛（本轮 g4/g5 结论全部如实上报） | — |
+
+### 仍未完成 / 已知问题（T48 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，属段 B）与 **g5 FAIL 1527 帧次**（最早 119.2s ⇒ **段 I**，即 T49 的范围内）：自检没关、阈值一个没改，按段归属留后续项。
+2. `src/ui/globalrules.js:198`/`:200-228` 附近的陈旧注释（指向已不存在的对象）与 `termpane.js` 的 `maxWinW` 只被段 F/H 使用（其余段 cap=1024 行为不变）——故意不改判据文件。
+3. 段 H 未跑全量 `?selftest`（只跑定点 + 全片 gscan/scan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；本轮新增 `.scratch_t48.mjs`（gitignore 临时探针）；`src/scenes/h_absence.js`/`i_cleanup.js`/`data/dialogue.js` 等改动仍**未提交**。
+
+## T49 段 I（FIX_V5 §I：1:59 红色竖扫线 / 2:03 窗口按内容自适应 / 2:07 黑窗提前退场 + 红面板 z 序）— 已完成
+
+范围 118.3–129.0s。改的文件只有 `src/scenes/i_cleanup.js`（401 → 约 505 行）。**判据/阈值一个字未改**（`src/ui/globalrules.js` 未编辑）；段 I 的 ctx 读数 58%→27% 本就由 `ctxAt()`（`src/ui/dsh.js:59-91`，119.0→120.5 线性）给出，**未动**。
+
+### 改了什么
+
+| §I 项 | 改前（实测基线） | 改后（实测） |
+| --- | --- | --- |
+| 1:59 红色扫线 | `drawCompaction` 只有一条压 alpha 的扫描线，每格自带**随机** `del` 时刻（119.2–123.4）与扫线无关；**扫线出画后 123.2 仍留 261 个碎片盒**；无灼烧/火花 | 扫线位置**决定**擦除：`swU=clamp((t−119.796)/3.4)`（中点正落在 `fragments` 锚点 121.496），`sx=−60+swU·(W+120)`；接触瞬间白热竖条（5px，`shadowBlur 18`）+ 每片 2 根琥珀火花（**画在 190px 红带之后**）；`swU≥uEnd` 直接不画 ⇒ `codeDeco` 片数 272 → 133(121.5) → 46(122.4) → **0(123.2)** |
+| 1:59 碎片密度/大小 | 22 列固定 26px | 格区 x 0.055W–0.945W / y 0.20H–0.78H、17×16=272 格、26/30px 两种字号（短 token 用大一号） |
+| 2:03 窗口文字超出边界 | 固定 845×540 窗，`codeW=706` < 最长逻辑行 722px ⇒ 第 3 行折成 `…anchor. kee`/`p it.` 并贴到内缘（文字右缘 935 / 内缘 955） | 新增 `sysPanelGeom()` 按内容自适应（量 `streamLines` 各行 + `(draft)` 取 maxW）：窗宽 767 → 915，同一行**放完**（文字右缘 989 < 内缘 1049），`minPad 29.6/24` |
+| 2:07 黑窗退场 | `systemPanelAlpha` 收尾窗 **127.5–128.05**（晚于首块红面板 127.539） | 收尾窗 **126.85–127.20**（早 **0.339s**）；`codeFade` 同步提前到 126.35–126.85 |
+| 2:07 红面板 z 序 | 红面板是 `stage3d` 上的 3D 网格（`BoxGeometry`+两张 `textPlane`）⇒ 在 `threeCanvas` 里画，**永远**被 stageBack 的黑窗/权限弹窗/非法堆压住 | 3D `errGrp`/`errPanels` 整块删除，新增 `drawErrPanels()` 画在 **`ctx.gFront`**（合成序倒数第二，只在 ui 之下）：`E_PERMISSION`/`E_ILLEGAL_ARG`/`E_PARADOX` 各 883×194、尾随两块晚 0.10/0.20s、从正中淡入 + 上浮 26px |
+| 顺带① 面板审计 | `warningModal:E_PERMISSION/E_ILLEGAL_ARG/E_PARADOX [screen/front] minPad 6.8–12.8 对 24`（`scan 0.2` 报 FAIL） | `minPad 24/24` |
+| 顺带② 真重叠 | `t=128.8 (I) stage IoU=0.554 A"write ~/world/system" ∩ B"request rejected"` | 弹窗 **128.28 归零**（早于非法堆首帧）⇒ 全片 0 帧 |
+
+### 证据
+
+```
+定点（真 GPU ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 …)） node .scratch_t49.mjs 119.2 … 129.0（19 帧）
+  每帧(含 gl.finish) mean 3.1–14.1ms；errors=0；违规=0；G5 越界=0；overlaps=0
+  碎片 codeDeco：119.6=272 / 121.5=133 / 122.4=46 / 123.2=0；px.mean 123.2=0.130、126.8=0.153
+  黑窗  127.4 sysPanelAlpha=0.2 → 127.7 起 stage 层文字盒 0（127.2 已归零）
+  红面板 127.7 front 层 2 盒（833×194 级）压住权限弹窗；128.2 front 3 盒；128.6 起 0 盒（+0.78s 结束）
+  权限弹窗 127.7 在、128.3 起退干净（128.8 只剩非法堆 stage 3 盒，重叠 0）
+node .scratch_layers.mjs scan 0.2   → 1060 帧；文字重叠全片命中 0 帧；面板 37 块/失败 0 组（含红面板 minPad 24/24、sysPanel:~/world/system.prompt 767×273 minPad 29.6/24）
+node .scratch_layers.mjs gscan 0.2  → g2/g3/g6/g9 PASS；g4 FAIL 2 处（只剩 b:pendulum 14.6–18s、b:fourier 18.6–22.4s）；g5 FAIL 1527→1136 帧次（最早 119.2s→148.4s＝段 K ⇒ 段 I 零越界点）
+npm run doctor                      → PASS 5 / FAIL 0（b1 75 文件 / b2 74 模块 / c 142 文件）
+```
+
+### T49 的关键结论
+
+1. **"z 序在最上"不是深度问题而是合成序问题**：`compositor.present()` 的序是 `threeCanvas → stageBack → stageFront → whale → ui`，凡是挂在 `stage3d` 上的东西都在**所有 2D 层之下**（实测 127.7 第一块红面板在正中 `ndc[−0.05,0.06]`、屏上 584×241px 却被黑窗盖住）。要真正压在最上层，只能画在 `ctx.gFront`/`ctx.gUI`。
+2. **面板审计的内边距是设备像素，不是逻辑像素**：`src/ui/text.js:799` 用 `rec.pad`（=24 设备像素），`:756` 的 `pad * sc.dev.scale` 是**未被使用的死变量** ⇒ 任何 `g.scale(<1)` 的"缩放冒出"都必 FAIL（实测缩到 0.06 时 `minPad 6.8`）。修法是换入场方式（淡入 + 位移），**不是**改检测。
+3. **擦除范围必须与视觉扫描线同一变量**：旧实现只用扫描线压 alpha，擦除靠每格随机 `del` ⇒ 线与擦除脱节、扫完还留 261 盒。改成 `swU` 线性推进 + `swU≥uEnd → continue` 后，`fragments` 锚点处正好"擦到一半"。**不要用 smoothstep**（会让线与擦除脱节）。
+4. **注意：把 UI 从 early-return 之后搬出来，等于让一个"从来没画过"的 UI 突然出现**：权限弹窗原先被黑窗的 `open<=0.01 return` 吃掉（T48 时代根本没画过），搬出后立刻和 128.3 起的非法参数堆撞上（IoU 0.554）。改 UI 出场顺序后**必须重跑全片 scan**，逐帧定点会漏掉单帧重叠。
+5. **收尾窗提前不能只改一个函数**：黑窗提前到 127.2 后，原先挂在 `drawSystemFile()` 末尾的权限弹窗会随 `return` 一起消失 ⇒ 必须同时搬成独立函数，否则"修好黑窗却弄丢弹窗"。
+6. 视觉验证不可省：火花画在红带**之前**会被 150–190px 红带洗掉（截图才发现），改到红带之后才看得见。
+
+## 决策日志（R10：T49 段 I）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R10-D1 | 红面板从 `stage3d` 网格改画 `ctx.gFront` | `present()` 合成序决定 stage3d 永远在最底；§I 要求红面板 z 序在最上 | 恢复 `errGrp`/`errPanels` 块 |
+| R10-D2 | 入场动画改「淡入 + 上浮 26px」，不用 `g.scale(0.06→1)` | `text.js:799` 按设备像素判 `minPad`，CTM 缩小必 FAIL；改检测＝放宽门槛，故不动检测 | 恢复 `g.scale/g.rotate` |
+| R10-D3 | 权限弹窗搬成独立 `drawPermission()` | 黑窗提前到 127.2 归零后 `open<=0.01` 会 return，弹窗再也画不出来 | 移回 `drawSystemFile()` 末尾 |
+| R10-D4 | 权限弹窗提前到 128.28 归零 | 搬出后与 128.3 起的非法参数堆真重叠（IoU 0.554），§2.8 要求 0 重叠 | 恢复 `span(t,127.7,128.2)*(1-span(t,128.6,128.95))` |
+| R10-D5 | 删除时刻改由扫线位置决定（删掉 cell 的 `del` 字段） | §I 要求"扫线所过之处碎片被擦掉"；原随机 `del` 与扫线无关且扫完还留 261 盒 | 恢复 `del` 字段 + alpha 遮罩 |
+| R10-D6 | 碎片格点场改到 x 0.055W–0.945W / y 0.20H–0.78H | 原最左列 `X0=40`（2.3%）破 G5 左 5% 下限；下限 y 必须避开标签带（104–178）否则同层文字重叠 | 恢复 `X0=40`/`Y0=H*0.22` |
+| R10-D7 | `delete` 标签 + `compacting context…` 字号 14/20 → 26，y 分置 168/124 | 12–14px 小字同时破 G1 清晰度与 G5；两点基线相距 44px 保证盒不重叠 | 恢复旧字号/坐标 |
+| R10-D8 | 判据文件 `src/ui/globalrules.js` 一个字不动 | 改判据/阈值＝放宽门槛（本轮面板审计 FAIL 用改实现解决，全部如实上报） | — |
+
+### 仍未完成 / 已知问题（T49 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，属段 B）与 **g5 FAIL 1136 帧次**（最早 148.4s ⇒ **段 K**，即 T51 的范围）：自检没关、阈值一个没改，按段归属留后续项。
+2. `src/ui/globalrules.js:198`/`:200-228` 附近的陈旧注释（指向已不存在的对象：`e:orb`、段 G 摇杆）与 `text.js:756` 的 `pad * sc.dev.scale` 死变量——**故意不改**（改判据文件/审计代码有放宽门槛之嫌，登记为遗留）。
+3. 段 I 未跑全量 `?selftest`（只跑定点 + 全片 gscan/scan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；本轮新增 `.scratch_t49.mjs`（gitignore 临时探针）；`src/scenes/i_cleanup.js` 等改动仍**未提交**。
+
+## T50 段 J（FIX_V5 §J：2:23 去红横条+边缘补偿 / 2:26 38%·64% 排版 / 2:27 重定时）— 已完成
+
+范围 129.0–147.9s。改的文件：`src/scenes/j_overflow.js`（560 → 656 行）、`src/main.js:503-535`（`drawHud` 百分比与标签）、`src/scenes/anchors.js:144-147`（blackout / resume）、`src/core/exposure.js:110`（**仅**段 J 豁免窗左沿）。**判据/阈值一个字未改**（`src/ui/globalrules.js` 未编辑）。
+
+### 改了什么
+
+| §J 项 | 改前（实测基线） | 改后（实测） |
+| --- | --- | --- |
+| 2:23 去掉背景红色横条 | 整屏 `for(y=0;y<H;y+=48) fillRect(0,y,W,14)`、`flash=clamp(alarm*(0.55+0.45*rms*1.7+0.30*heat))`，覆盖约 29% **中部**画面（T23b 为 `b)` 边缘 ≥4% 与 §6 亮度加的） | 整块删除；补"仅边缘"张力：上下 **12% 条带**红色扫描带（14px/26px，`strobe=clamp(0.34+0.36*clamp(rms*1.5)+0.20*heat)*(0.72+0.28*pulse)`）、`createRadialGradient` 边缘红暗角（随 rms 脉动）、104 条径向速度线（r0 0.30–0.74R、宽 2.2–6.6、红/琥珀） |
+| 2:23 背景改深蓝灰 | `if(!ctx.bgIs3d)` 的 2D 底色 `#160a0c→#3a0d10` —— **死代码**：`ctx.bgIs3d` 恒 true（`compositor.js:111`） | 在 3D 之上加 `lighter` 加法雾 `rgb(18,24,34)`（另把死分支调成 `#0f141b→#1e2836` 留档） |
+| 2:23 裂纹 / 抖动 / 切片加强 | 裂纹 `lineWidth 2.5`、`shadowBlur 18`、alpha ×0.9；`fx` shake 136:0.35、140:0.5、145:0.9 | 裂纹 `lineWidth 4.5`、`shadowBlur 34`、alpha ×1；`fx` shake 136:0.5、140:0.7、新增 144.5:0.8/0.6、145:1.0/1.0、glitch 146.5:0.8/0.3 → **145.6:1.0/0.5**；新增 `drawSliceGlitch()`（照搬 `k_storm.js:893` 手法，配色改红/琥珀） |
+| 2:26 排版 | 百分比 270px @0.44H；提示 `context limit reached` 74px @0.46H、`the session is full.` 24px @0.56H ⇒ 百分比盒与提示盒只差 0.055H | limit 窗内百分比 **200px @0.38H**（§5.3 下限）、`context` 标签偏移 0.62→0.82；提示 74px @**0.64H**、session 行 24→**34px** @0.715H |
+| 顺带（阻断级 bug） | `limit` 锚点 onset 实测 **145.5**（兜底 144.9 从未生效），旧式 `span(t,tLimit,tLimit+0.45)`（`span` 过右端**恒为 1**）叠加黑场前移后 alpha ≤0.04 ⇒ limit 屏**一帧都看不见** | 改显式窗 `T_LIMIT_IN/FULL/F0/F1 = 144.20/144.75/145.25/145.58`（满幅窗正跨 `ctxAt` 到 100% 的 145.0）；`drawHud` 的 `inLimit` 同步改 `144.2–145.6` |
+| 2:27 碎裂 | `tShatter=145.0`、`clamp((t-145)/0.55)` | `T_SHATTER=144.5`、`shatter=clamp((t-144.5)/1.1)*(1-span(145.6,145.8))`（2:24.5–2:25.6）；黑罩改 `0.72*(1-0.5*shatterU)` 随碎散透开 |
+| 2:27 黑场/键入/硬切 | `tBlack=146.5`、`typed(start=146.65, cps=12)`、`quiet 147.75` | `T_BLACK=145.6`（+0.22 淡到全黑）、`T_TYPE=145.8`、`cps 11`（实测 12 字 147.102s 打完）、`⏎` @147.2、`quiet 147.88`；`cubeA`/`j4`/`hdA` 收尾窗同步前移 |
+| 跨文件同步 | `anchors.js` blackout 146.5 / resume 147.0；`EXEMPT_WINDOWS` 段 J 左沿 146.45 | blackout **145.6** / resume **145.8**；豁免窗左沿 **145.6**（右沿 147.95 与全部阈值不动） |
+
+### 证据
+
+```
+定点（真 GPU ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 vs_5_0 ps_5_0, D3D11)）
+  node .scratch_t50.mjs 141.0,143.0,144.2,144.5,144.75,145.0,145.25,145.3,145.5,145.58,145.6,145.7,145.9,146.0,146.3,147.0,147.2,147.5（21 帧）
+    每帧(含 gl.finish) mean 2.5–9.8ms；errors=0；违规=0；G5 越界=0；重叠=0
+    2:26 盒：100% px200 x0.365–0.635 y0.287–0.502 / context px40 y0.513–0.556 /
+            context limit reached px74 x0.257–0.743 y0.606–0.685 / the session is full. px34 y0.699–0.736
+            ⇒ 百分比盒底 0.502 → 提示盒顶 0.606 = 0.104H = 112px ≥ 74px（一行字高），三盒互不相交
+    2:27 时间轴：145.5 100%+提示同屏 → 145.58 提示已退（只剩 %+context）→ 145.6 黑场（文字盒 0，px.mean 0.1405→0.001@146.0）
+            → 146.0 "d" → 147.0 "dsh --resum"(11 字) → 147.2 "dsh --resume ⏎" → 147.88 纯黑硬切
+  node .scratch_t50scan.mjs 129.0 147.85 0.5（页面内 480×270 复算 b)/u) 同口径，38 帧）
+    b) FAIL 0 / u) FAIL 0
+    129.0 edge 0.080 meanLum 0.113（补边条前 0.033/0.101 双 FAIL）；130.5–133.5 edge 0.125–0.161；
+    133–141 meanLum 0.112–0.146（加法雾前 0.077–0.099，u) 18 帧 FAIL）；145/145.5 PASS；146.0–147.5 exempt
+node .scratch_layers.mjs scan 0.2   → 1060 帧；文字重叠全片命中 0 帧；面板 37 块/失败 0 组
+node .scratch_layers.mjs gscan 0.2  → g2/g3/g6/g9 PASS；g4 FAIL 2 处（只剩 b:pendulum 14.6–18s、b:fourier 18.6–22.4s）；
+                                      g5 1136 帧次（与 T49 相同，最早仍 148.4s＝段 K ⇒ 段 J 零越界点）
+npm run doctor                      → PASS 5 / FAIL 0（b1 75 文件 / b2 74 模块 / c 143 文件）
+```
+
+### T50 的关键结论
+
+1. **T23b 的红横条同时是 `b)`「边缘像素 ≥4%」与 §6 `meanLum ≥0.10` 的兜底**：删掉后 129.0–130.0 边缘只剩 3.0–3.3%、133.5–140.5 亮度 0.077–0.099（u) 18 帧 FAIL）。删它必须**同步**补"仅边缘"的硬边长直边（上下 12% 条带）与背景抬亮；把横条缩小留着不满足 §J「去掉」。
+2. **`span(t,a,b)` 过右端后恒为 1**：`span(t,tLimit,tLimit+0.45)` 是"从 onset 起一直为 1"，不是 45ms 窗。配合黑场前移，limit 屏算出 alpha ≤0.04 ⇒ **一帧都看不见**；且锚点 `limit` onset 实测 **145.5**，兜底值 144.9 从未生效。凡"窗口"语义必须写成 `span(a,b)*(1-span(c,d))`。
+3. **`ctx.bgIs3d` 恒为 true**（`src/core/compositor.js:111`）⇒ 段 J 里所有 `if(!ctx.bgIs3d)` 的 2D 底色都是死代码；"背景改深蓝灰"只能画在 3D **之上**（用 `lighter` 加法雾，避免压暗体素立方体）。
+4. **§J 2:26 与 2:27 的时间冲突**：2:26 是**重定时前**的观测时刻（旧 limit 窗覆盖到 146.5），2:27 是显式硬时间 ⇒ 以 2:27 为准，2:26 的布局规则整体搬到新 limit 窗。这一条已登记进决策表（R11-D4）。
+5. **"≥一行字高"逼出字号决策**：270px 巨字盒高 ≈0.29H，与 64% 的提示盒净间距只剩 65px（`context` 标签还夹在中间）⇒ limit 窗内把百分比收到 200px（§5.3 下限）后净间距 112px，且三盒互不相交。
+6. **`typed()` 的 `jitter=0.35` 让实际输出慢于 `cps`**（`E[1/(1+0.35u)]>1`）：`cps=12/1.4=8.571` 时 12 字要到 147.470s（超 spec 的 2:27.2）⇒ 同参数实测取 `cps=11`（147.102s）。凡是"按 cps 定时"的键入都必须实测完成时刻。
+7. 跨文件同步只动"跟随规格"的一处：`EXEMPT_WINDOWS` 段 J 左沿 146.45→145.6（右沿与全部阈值不动）；`EXPOSURE_KEYS` **不动**——实测把 146.2 的 5.40 前移会把 145.5 的曝光抬 ≈2.2×，有 u)/v) 超限风险。
+
+## 决策日志（R11：T50 段 J）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R11-D1 | 删整屏红横条，改「上下 12% 边缘扫描带 + 边缘暗角 + 径向速度线」 | §J 2:23 明令去掉横条；但它是 `b)`/§6 亮度兜底（实测删掉即 3.0–3.3% 边缘、0.077 亮度，双 FAIL） | 恢复 `for(y=0;y<H;y+=48) fillRect` 整屏条 |
+| R11-D2 | 深蓝灰用 `lighter` 加法雾 `rgb(18,24,34)` 画在 3D 之上 | `ctx.bgIs3d` 恒 true ⇒ `if(!ctx.bgIs3d)` 分支是死代码，2D 底色改色对画面零影响 | 删雾 + 恢复 `#160a0c→#3a0d10` |
+| R11-D3 | limit 屏改显式窗 `144.20/144.75/145.25/145.58` | 锚点 onset 实测 145.5 + 黑场前移 ⇒ 旧 `span(t,tLimit,tLimit+0.45)` 一帧都看不到 | 恢复旧表达式 |
+| R11-D4 | 2:26 的布局规则整体搬到新 limit 窗（以 2:27 的显式时间为准） | 两处规格时间冲突；2:27 是显式硬时间且明写"黑场自 2:25.6" | 回到 2:26 原时刻（会与黑场冲突） |
+| R11-D5 | limit 窗内百分比 270 → 200px、标签偏移 0.62 → 0.82 | 要让"百分比盒 → 提示盒"净间距 ≥一行字高（74px）且三盒互不相交；200 是 §5.3 的下限 | 恢复 270 / 0.78 |
+| R11-D6 | 键入 `cps` 取 11（实测 12 字 147.102s 完成） | `typed()` 的 jitter 让实际慢于 cps；8.571 要到 147.470s，超 spec 的 2:27.2 | 恢复 `12/(T_ENTER-T_TYPE)` |
+| R11-D7 | 黑罩 `0.72 → 0.72*(1-0.5*shatterU)` | 全屏 0.72 黑罩与"碎散 2:24.5–2:25.6"同屏会把立方体爆散压平 | 恢复固定 0.72 |
+| R11-D8 | `EXEMPT_WINDOWS` 段 J 左沿 146.45→145.6，右沿与全部阈值不动；`EXPOSURE_KEYS` 与 `globalrules.js` 一字不动 | 黑场按规格提前即豁免窗必须跟随；改曝光关键帧/判据有 u)/v) 超限或放宽门槛之嫌 | 恢复 146.45 |
+| R11-D9 | `anchors.js` blackout 146.5→145.6、resume 147.0→145.8（附注释） | 跟随 §J 2:27 的显式时间；锚点表是曲线的唯一来源，不跟随会与实现打架 | 恢复旧时间 |
+
+### 仍未完成 / 已知问题（T50 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，属段 B）与 **g5 FAIL 1136 帧次**（最早 148.4s ⇒ **段 K**，即 T51 的范围）：自检没关、阈值一个没改，按段归属留后续项。
+2. `EXPOSURE_KEYS` 的 `{146.2, 5.40}` 现在落在黑场里（黑场曝光增益恒 0，实际无影响），而它的原意是给 limit 屏——limit 屏现在 144.2–145.58，只吃到 1.34→5.40 的插值前段。**故意不动**（前移会抬 145.5 的曝光），登记为遗留。
+3. 段 J 未跑全量 `?selftest`（只跑定点 + 480×270 同口径局部复算 + 全片 gscan/scan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；本轮新增 `.scratch_t50.mjs`/`.scratch_t50scan.mjs`（gitignore 临时探针）；`src/scenes/j_overflow.js`、`src/main.js`、`anchors.js`、`exposure.js` 等改动仍**未提交**。
+
+## T51 段 K/L（FIX_V5 §K/L：2:42 标题溢出复核 / 2:51 气泡→大号终端 / 2:56 棱镜光路图）— 已完成
+
+范围 147.9–177.4s。改的文件：`src/scenes/l_training.js`（630 → 约 601 行）、`src/scenes/k_storm.js`。**判据/阈值一个字未改**（`src/ui/globalrules.js`、`src/ui/text.js`、`tools/selftest.mjs` 均未编辑）。完成定义是「① `npm run doctor` 过；② 受影响区间按 0.2s 采样 0 文字重叠且 `errors=0`（本轮做到 **0.1s/296 帧**）；③ 写 `docs/REVIEW_T51.md`；④ 不放宽任何门槛；⑤ 不跑全量 `?selftest`」。
+
+### 改了什么
+
+| §K/L 项 | 改前（实测基线） | 改后（实测） |
+| --- | --- | --- |
+| 2:42 左上角窗口标题溢出 | `title:train · loss`（用户报"溢出"） | **复核不动代码**：T41 已把 `panel()` 标题改 top 基线 + `maxTW=w-24` 截断 + 裁剪；实测标题盒 x 0.086–0.214 / y 0.202–0.239 完全在标题栏内、`minPad 2.3/0`（标题栏 `pad:0` 口径）、越界 0 |
+| 2:51 聊天气泡 | 中文气泡 + 3D 面片 + 420 粒 `THREE.Points` 碎片（`TYPING='对方正在输入…'`、`DRAFTS=['在吗','我有话想说','…算了']`、`buildTypingBubble`/`drawBubbleFace`/`updateTypingBubble`/`drawTypingHint`/`bubbleShards`… **全栈删除**） | 新增 `drawTerminal()`：`beginPanel→panel({title:'dsh · session #001', bg:'rgba(14,17,24,0.86)'})→endPanel`（**黑底半透明**）、`TERM_W_FRAC=0.58`（实测 1114px ≥ 规格 0.55）、高 300、`y=0.30H`（右缘 0.790W / 底 0.578H 全在 G5 内） |
+| 2:51 草稿逐字键入又删除 3 次（英文短句 ≥80px） | 无（原气泡是静态/中文短句） | `TERM_DRAFTS=['you there?','still here','never mind']`，窗 `[tBall−2.92, tBall]`=170.78→173.70 均分三段，每段 `0–0.46 键入 / 0.46–0.56 停 / 0.56–1 删除`；提示符 `MONO(84,700)`（≥80px）+ `cursorOn()` 闪烁方块 |
+| 2:51 状态行 `peer typing…` 闪烁三点 | 无 | `MONO(34,600)` `'peer typing'` + 3 个 `arc`，亮度 `0.5+0.5·sin((t·2.4−i·0.42)·TAU)` |
+| 2:51 立绘不得与面板同侧（G1） | 立绘恒占 x 0.591–0.909 | `hideForTerminal = span(170.35,170.72)·(1−span(173.75,174.12))`，与原 `hideForPrism=span(173.9,174.6)` 取 `max`（理由见关键结论 1） |
+| 2:56 三棱镜 → 真正的光路图 | 旧「三棱镜色散」实现（无斯涅尔/无分段渐进） | 全部重写：等边三角形（三边实测均 **374.123px = R√3**，`R=H·0.20=216`）、柯西 `n(λ)=1.48+0.03/λ²`、矢量斯涅尔 `refract()`+射线-线段求交、白光 8 段 dash `0.78s` 入射、玻璃内 `0.58s` 逐波长、7 色扇形 `1.14s` **各自从本波长出射点**展开 |
+| 顺带（G5，段 K/L） | 211 帧 / **906 实例**越界（工具卡 `left 1.5–3.1%`、`DE`/`六`/`Ein`、px68 `"0"` top 1.0%、风暴 px12、棱镜标注 bottom 86.5%） | 工具卡 `targetX=W·0.07` + 去掉 x 抖动 + 标签 `globalAlpha≤0.04` 门槛；数字卡 `cw=W·0.14`/`gap=(0.90W−cw·N)/(N−1)`/`x0=W·0.05`；潮汐公式与公式风暴改**旋转外接矩形**夹取；棱镜标注 15px@0.86H → 22px@0.765H ⇒ **0** |
+
+### 证据
+
+```
+定点（真 GPU ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 vs_5_0 ps_5_0, D3D11)）
+  node .scratch_t51.mjs 148.4,151.8,162.6,172.6,175.3,176.0,177.2（7 帧）
+    每帧(含 gl.finish) mean 4.5–11.9ms；errors=0；违规=0；G5 越界=0；重叠=0
+    终端 L.metrics.terminal：170.9 {alpha:0.42,idx:0,typed:0,draft:'you there?'} / 171.6 {alpha:1,typed:0.83}
+      / 172.6 {alpha:1,idx:1,typed:0.42,draft:'still here',boxW:0.58} / 173.0 idx:2 'never mind' / 173.5 alpha:0.53 / 174.9+ alpha:0
+    棱镜 L.metrics.prism：174.95 beamU 0.06 / 175.3 beamU 0.509,a 1 / 176.0 beamU 1,refrU 0.547
+      / 176.6 refrU 1,fanU 0.296 / 177.2 fanU 0.822；thetaDeg 恒 52.15；7 个出射点 x 0.5556–0.5585 / y 0.4112–0.4202（聚在 10px 内）、出射张角 12.58°
+  node .scratch_t51scan.mjs 147.9 177.4 0.1 → 296 帧：G5 越界 0 帧/0 实例、文字重叠 0 帧/0 实例（修前同范围 211 帧/906 实例）
+node .scratch_layers.mjs scan 0.2   → 1060 帧；文字重叠全片 0 帧；面板 39 块/失败 0 组
+                                      （含 title:dsh · session #001 / l:term 170.8–173.6s ×15 帧、盒 4、minPad 29.6/24、越界 0、矩形 1114×300）
+node .scratch_layers.mjs gscan 0.2  → g2 PASS / g3 PASS / g6 PASS / g9 PASS；g4 FAIL 2 处（只剩 b:pendulum 14.6–18s、b:fourier 18.6–22.4s＝段 B）；
+                                      g5 FAIL 1136 → 660 帧次，最早越界点 148.4s → 181.8s（段 M）⇒ 段 K/L 零越界点
+npm run doctor                      → PASS 5 / FAIL 0（b1 75 文件 / b2 74 模块 / c 144 文件）
+```
+
+### T51 的关键结论
+
+1. **0.55W 的终端放不进「立绘 + G5」剩下的带宽 ⇒ 只能让立绘退场**：立绘 rect 恒占 x 0.591–0.909（y 0.15–1.17），G5 又要求舞台文字左缘 ≥5%W ⇒ 无立绘时可用带宽只有 1135−96=1039px=**54.1% < 55%**。规格"宽 ≥55%"与 G1"立绘出场期间同侧不放面板"在本拍无法同时满足 ⇒ 按 G1 让立绘在终端窗内退场（`hideForTerminal`），终端取 58%。两段淡变窗（170.35–170.72 / 173.75–174.12）与原 `hideForPrism` 不重叠。
+2. **`const C` 会遮蔽 palette**：三角形顶点若命名 `A/B/C`，函数内的 `const C` 遮蔽从 palette 导入的 `C` ⇒ `rgba(C.fg,…)` = `rgba(undefined,…)` → 抛 `Cannot read properties of undefined (reading 'replace')`（栈指当时 580 行；靠探针新增的 `__errors` 栈打印才定位）。顶点改名 **PA/PB/PC**。
+3. **`span(t,a,b)` 过右端恒为 1，不能当"整段不透明度斜坡"**：用 `span(t,PRISM_T0,177.4)` 当元素 alpha 时，入射/折射阶段只有 0.16–0.55 ⇒ 175.3 截图几乎只剩银河、光路图看不清。改成快速包络 `env=clamp(u/0.25)·fade`（`fade=1-span(t,177.28,177.4)`），三段动画自身负责"渐进出现"，同帧 `prism.a` 0.159 → **1**。
+4. **旋转绘制的公式必须按"旋转外接矩形"夹取**：只按半宽 `hw` 夹中心时，长公式（attention ≈150px）旋转后竖直方向甩出 ~80px、字盒照样越 8%/80%（修前 164.2–169.7 共 58 帧 / 508 实例）；改用 `extX=|cosθ|hw+|sinθ|hh`、`extY=|sinθ|hw+|cosθ|hh` 后归零。
+5. **2:42"标题溢出"已被 T41 全局修覆盖**：`panel()` 的 top 基线 + `maxTW=w-24` 截断 + 裁剪就是那个修法；本轮只复核留证，不动代码。
+6. **径向渐变不要用全屏 `fillRect`**：棱镜辉光原为全屏 `fillRect(0,0,W,H)` ⇒ 该帧 mean 18.3ms；改成只填渐变覆盖的方形区域（半径外 alpha=0）后 175.3 → **11.7ms**，画面不变。
+7. **g5 归零的可验证性**：段 K/L 的越界不是"整段看不见"而是逐帧可枚举（`textBoxes()` + `safeAreaViolations` 口径），所以改用**段内 0.1s 枚举**（296 帧 0/0）作为完成定义 ② 的直接证据，再用全片 `gscan` 复核归属：1136 → 660 帧次，最早点 148.4s（段 K）→ **181.8s（段 M）**，与"段 K/L 零越界点"一致。
+
+## 决策日志（R12：T51 段 K/L）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R12-D1 | 2:42 只复核、不改代码 | T41 已修（`panel()` top 基线 + 截断 + 裁剪），实测标题盒完全在标题栏内；改它属于"动了不该动的" | — |
+| R12-D2 | 删气泡全栈，改 58% 宽终端 | §K/L 2:51 明令"不再使用气泡"、要"黑底半透明终端(宽 ≥画面 55%)、大号提示符(≥80px)" | 恢复气泡 + 碎片 |
+| R12-D3 | 终端在场时立绘退场（`hideForTerminal`） | 无立绘可用带宽仅 54.1% < 规格 0.55；G1 第 9 行禁止"立绘出场时同侧放面板"，两者不可兼得时以 G1 为准 | 去掉 `hideForTerminal`（终端会被立绘压住） |
+| R12-D4 | 终端窗 `y=0.30H`、高 300、宽 0.58W | 2:51 窗内是"孤立场"（无立绘、无其他面板），放正中偏上避免与底部歌词带相交，且四边全在 G5 内 | 改坐标/宽高 |
+| R12-D5 | 棱镜三段用 0.78/0.58/1.14s 串联、`PRISM_T0=tBall+1.2` | 规格要"入射 ≈0.8s + 折射 ≈0.6s + 扇形 ≈1.2s"＝2.5s，而 `trapped` onset（实测 175.142）到段末只有 2.26s ⇒ 起点提前到公式球收尾 174.853 之后 | 改回 `tPrism=sec('L','trapped',173.7)` |
+| R12-D6 | 元素不透明度用短包络 `env=clamp(u/0.25)·fade`，不用整段 `span` | `span(t,a,b)` 过右端恒 1（见关键结论 3），整段慢斜坡会让光路图在 175.3 只有 0.159 | 改回 `a` |
+| R12-D7 | 三角形顶点命名 PA/PB/PC | `const A/B/C` 遮蔽 palette 的 `C` ⇒ `rgba(undefined)` 崩（见关键结论 2） | 改回 A/B/C（会崩） |
+| R12-D8 | G5 的四处夹取都改"旋转外接矩形"，并给入场标签加 `globalAlpha≤0.04` 门槛 | 只按半宽夹不住旋转后的长公式；入场瞬间卡片在带外会被 `textBoxes()` 登记成越界 | 恢复半宽夹取 / 去掉 alpha 门槛 |
+| R12-D9 | 棱镜辉光只填渐变覆盖区，不用全屏 `fillRect` | 全屏填充让该帧 18.3ms（离线导出 12714 帧会线性放大） | 恢复全屏 `fillRect` |
+| R12-D10 | 判据文件与 `tools/selftest.mjs` 一个字不动 | 改判据/阈值＝放宽门槛（本轮 g5 结论全部如实上报） | — |
+
+### 仍未完成 / 已知问题（T51 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，属段 B）与 **g5 FAIL 660 帧次**（最早 **181.8s ⇒ 段 M**，即 T52 的范围；前 3 条为 `~/world/…` / `~/world/love.py` top 3.8% @(108,45) 与 `(`/`−` left 0.5% @(86,280)/(86,345)）：自检没关、阈值一个没改，按段归属留后续项（段 K/L 已零越界点）。
+2. `src/ui/globalrules.js:198`/`:200-228` 的陈旧注释（指向已不存在的 `e:orb`、段 G 摇杆）与 `text.js:756` 的 `pad * sc.dev.scale` 死变量——**故意不改**（改判据/审计代码有放宽门槛之嫌，登记为遗留）。
+3. 段 K/L 未跑全量 `?selftest`（只跑定点 + 段内 0.1s 枚举 + 全片 gscan/scan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；本轮新增 `.scratch_t51.mjs`/`.scratch_t51scan.mjs`（gitignore 临时探针）；`src/scenes/l_training.js`、`src/scenes/k_storm.js` 等改动仍**未提交**。
+
+## T52 段 M（FIX_V5 §M：2:57 心跳 / 3:01 代码窗 / 3:02 只留一套爱心 / 3:08 同心同形同旋转）— 已完成
+
+范围 177.4–188.5s。改的文件：`src/lib/swarm.js`、`src/main.js`、`src/lib/heart3d.js`、`src/lib/code.js`、`src/scenes/m_algebra.js`。**判据/阈值一个字未改**（`src/ui/globalrules.js`、`src/ui/text.js`、`tools/selftest.mjs` 均未编辑）。完成定义是「① `npm run doctor` 过；② 受影响区间按 0.2s 采样 0 文字重叠且 `errors=0`；③ 写 `docs/REVIEW_T52.md`；④ 不放宽任何门槛；⑤ 不跑全量 `?selftest`」。
+
+### 改了什么
+
+| §M 项 | 改前（实测基线） | 改后（实测） |
+| --- | --- | --- |
+| 2:57 粉色爱心跳动 | 把 2:57 的粉色爱心当成了 `heart3d`；实测该帧 `heart3d.v=false`，画面上的粉色爱心是**全片持久蜂群**在段 M 的 `heart` 布局（`SEGMENT_COLORS.M=['#ff8fc8','#ff6b9d']`） | 心跳加在蜂群管线：VERT 新增 `uniform float uBeat`（布局坐标整体乘，`uBeat=1` 时逐位不变）+ `src/main.js swarmBeatAt(t)`（仅段 M；`bpm=sync.tempoAt(t)||128`、`per=60/bpm`，相位=最近起音点 `sync.onsetsIn(t−1.6,t)[…].t`，`1+0.12·hit(ph,0,0.055)+0.06·hit(ph,0.22,0.055)` = 主拍 **+12%** / 次拍 **+6%**） |
+| 3:01 代码窗口按 G1 自适应 | 面板 `y=H*0.04` ⇒ 标题盒 top **4.2%** 越 G1 的 8%；窗口按已输入文本逐帧定尺 | `drawLoveCode()` 重写：先按**完整文本**（`LOVE_CODE.slice(0,3)` 折行后的 `fullRows`/`fullBodyW`）定窗、再按流式文本填字 ⇒ 宽度随内容 `w=min(0.52W, 48+74+fullBodyW)`、打字过程窗不抖、文字永不出窗；`y=H*0.10` ⇒ 标题盒实测 y 0.102–0.139 / x 0.056–0.527 |
+| 3:02 只保留一套爱心 | 3:02 画面上有 6 颗"心"：heart3d 外壳 + 中心白球 + 线条心 + 白热核心 + 立绘抽出的心形点云 + 背景粉色蜂群心 + 左半边大号方程 | 保留 heart3d（蓝色粒子外壳 20000 粒 + **新增内层实体 3D 心**）；**枚举删除**：①中心白色球 `coreGlow`（`SphereGeometry(0.16,20,14)`，315 顶点）②平面线条心 `outline`（`TubeGeometry(CatmullRomCurve3(160 点),180,0.012,8)`，1629 顶点）③白热核心点团 `core`（Points 2000）④段 M 立绘心形点云（不再请求 `ctx.whale.points` 的 `to:'heart'` ⇒ 探针 `whalePts=null`）⑤`drawExtrudedEquation()`（大号心形方程 + 两块非文字底板 `rgba(58,16,48,.55)`/`rgba(160,48,96,.38)`）；heart3d 子对象实测 **8 → 6**（外壳 20000 + 内层 1716 + 3 环 + 火花 900） |
+| 3:02 方程改写进 `def love()` 函数体一行 | 大号方程以 56px 画在画面左半边（`x0=W*0.045` ⇒ `(`/`−` left 4.5%） | `LOVE_CODE` 第 3 行插入 `return (x**2 + 9/4*y**2 + z**2 - 1)**3 - x**2*z**3 - 9/80*y**2*z**3` |
+| 3:08 同心、同形、同旋转（内层 0.92） | 无内层实体心（只有白球/白核心） | 内层实体由**同一条** `heartPoint(u)` 曲线（`NSEG=144`）`THREE.Shape → ExtrudeGeometry(depth 0.42·scale, 无 bevel)`、`translate(0,0,−0.21·scale)` 居中、`inner.scale.setScalar(0.92)`，作为 `grp` 的**同一子节点** ⇒ 同心/同形/同旋转由父级共享（实测 `s=0.92`；心跳时 `0.92·(1+0.05·beat)`） |
+| 顺带（G5，段 M） | `~/world/…` top 4.2%（181.8s）、`~/world/love.py` top 4.2% 与 `(`/`−` left 4.5%（182.6s 起） | 代码窗下移 + 方程移入终端 ⇒ **段 M 零越界点** |
+
+### 证据
+
+```
+定点（真 GPU ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 vs_5_0 ps_5_0, D3D11)）
+  node .scratch_t52.mjs 177.6,178.4,178.5,178.6,178.75,179.4,180.5,181.8,182.6,183.4,184.5,186.5,187.5,188.2（14 帧）
+    全部 errors=0；违规=0；G5 越界=0；文字重叠=0；每帧(含 gl.finish) mean 3.0–7.7ms
+    心跳 swarm.beat：1.102(178.75 主拍) / 1.054(178.85 次拍) / 1.058、1.032(衰减) / 1(178.5–178.7、179.4、184.5、187.5)；其余段落恒 1
+    粉心像素包围盒（T52_PINK）：beat=1 → w 1475–1503；beat=1.102 → w 1575（pink 像素数 105k → 88k，粒子外散变暗）
+    heart3d kids：Points BufferGeometry n=20000 op=1 | Mesh ExtrudeGeometry n=1716 op=0.92 s=0.92 | RingGeometry×3 | Points n=900
+      （白球 / 线条心 / 白热核心点团全部不存在）；whalePts=null
+  node .scratch_t51scan.mjs 177.4 188.5 0.2 → 56 帧：G5 越界 0 帧/0 实例、文字重叠 0 帧/0 实例
+node .scratch_layers.mjs gscan 0.2  → g2 PASS / g3 PASS / g6 PASS / g9 PASS；g4 FAIL 2 处（只剩 b:pendulum 14.6–18s、b:fourier 18.6–22.4s＝段 B）；
+                                      g5 FAIL 660 → 562 帧次，最早越界点 181.8s → 191.0s（段 N，`handoff`/`handoff.md` left 1.1%）⇒ 段 M 零越界点
+npm run doctor                      → PASS 5 / FAIL 0
+```
+
+### T52 的关键结论
+
+1. **2:57 的"粉色爱心"是蜂群，不是 heart3d**：该帧 `heart3d.v=false`（`heartA` 要到 182.1 才淡入），画面上占满屏的粉色字形爱心是持久蜂群在段 M 的 `heart` 布局。心跳若加在 heart3d 上，2:57 全程不会有任何变化。
+2. **心跳直接用"整体乘 `uBeat`"最稳**：蜂群布局在顶点着色器里由属性算位置，只有整体的 `uBeat=1` 时逐位不变 ⇒ 非 M 段（beat 恒 1）不会引入任何像素回归。
+3. **3:08 的"同心同形同旋转"用"同曲线 + 同父级 + `scale 0.92`"实现**：内层实体只做 z 居中与等比缩放，不另设位置/朝向 ⇒ 结构上不可能错开；外壳（20000 粒）仍由 `grp` 统一旋转。
+4. **G1"文字不得大于窗口"要"先按完整文本定窗、再流式填字"**：按已输入文本逐帧定窗会让窗口随打字抽搐，且最后一行 71 字符的方程会把文字挤出窗外。
+5. **蜂群段 M 的 `heart` 布局本轮不动**（登记为遗留）：它是 2:57 规格点名的粉色爱心；`SEGMENT_SWARM` 是全片共享表，改 M 的 `to` 会连带 N 的 `from:'heart'`（违反队列规则⑥）。3:02 起该蜂群已散成背景弥散场（不再读作一颗心），画面里唯一的心形物体是 heart3d。
+
+## 决策日志（R13：T52 段 M）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R13-D1 | 心跳加在蜂群 `uBeat`，不加在 heart3d | 2:57 的粉色爱心实测是蜂群（该帧 `heart3d.v=false`）；加在 heart3d 上 2:57 无变化 | 删 `uBeat` + `swarmBeatAt` |
+| R13-D2 | 拍点取"最近起音点"，次拍延后 0.22·拍长 | 规格只说"咚咚两拍（主 +12%、次 +6%）与起音点/BPM 同步"，未给相位；以起音点为拍点最贴合"与起音点同步" | 改 `hit()` 相位/宽度 |
+| R13-D3 | 蜂群段 M 的 `heart` 布局不动 | 2:57 规格点名它；`SEGMENT_SWARM` 共享，改 M 会连带 N（规则⑥） | 改 `SEGMENT_SWARM.M`（需与 T53 一起） |
+| R13-D4 | `heart3d` 新开关默认 `whiteCore/lineOutline=true`、`solidInner=false` | 段 N（`n_handoff.js`）复用同一库且 §1.14 要保留原观感 ⇒ 默认值 = 改动前行为，N 零回归 | 删开关 |
+| R13-D5 | 内层实体用同一 `heartPoint` 曲线 + 同父级 + `scale 0.92` | 3:08 的同心同形同旋转由结构保证，不靠数值对齐 | 改 extent/scale |
+| R13-D6 | 代码窗"先按完整文本定窗、再流式填字"、`y=0.04H → 0.10H` | 满足 G1（文字 ≤ 窗口、左缘 ≥5%W、top ≥8%H）且窗口不抖 | 恢复逐帧定窗 / 0.04H |
+| R13-D7 | 大号方程从画面搬到 `LOVE_CODE` 第 3 行 | §M 3:02 明令"删除画面左半边的大号心形方程，改写进 `def love()` 函数体，作为一行代码" | 恢复 `drawExtrudedEquation` |
+| R13-D8 | 判据文件与 `tools/selftest.mjs` 一个字不动 | 改判据/阈值＝放宽门槛（本轮 g5 结论全部如实上报） | — |
+
+### 仍未完成 / 已知问题（T52 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，属段 B）与 **g5 FAIL 562 帧次**（最早 **191.0s ⇒ 段 N**，`handoff`/`handoff.md` left 1.1%）：自检没关、阈值一个没改，按段归属留后续项（段 M 已零越界点）。
+2. **蜂群段 M/N 的 `heart` 布局是"第二套爱心"**：本轮按队列规则⑥不动（见 R13-D3）。若要在 3:02 起严格"只剩一套爱心"，需在 T53（段 N）把 `SEGMENT_SWARM.M.to` 与 `SEGMENT_SWARM.N.from` **成对**改掉（例：M `heart→scatter` @182.2–184.2、N `scatter→ring`），否则 M→N 桥会把粉心再拉回来。
+3. 段 M 未跑全量 `?selftest`（只跑定点 14 帧 + 段内 0.2s/56 帧枚举 + 全片 gscan）——**未验证项**，登记为 T55 前的遗留。
+4. 全片导出未跑（≈31 分钟），留到 T55 终验；本轮新增 `.scratch_t52.mjs`/`.scratch_boot.mjs`（gitignore 临时探针）；`src/lib/swarm.js`、`src/lib/heart3d.js`、`src/lib/code.js`、`src/scenes/m_algebra.js`、`src/main.js` 等改动仍**未提交**。
+
+## T53 段 N（FIX_V5 §N 3:11 / 3:12 / 3:13 / 3:26 / 3:27）— 已完成
+
+完成定义是「`npm run doctor` PASS + 段 N 0.2s 采样 0 文字重叠 / 0 `errors` + `docs/REVIEW_T53.md` + 不跑全量 `?selftest` + 全局项只改本段」。
+
+```
+$ npm run doctor
+PASS 5 / FAIL 0    (a vite build / b1 75 个 src/*.js / b2 74 模块 / c 146 文件 / d __errors 空)
+
+$ node .scratch_t51scan.mjs 188.5 208.5 0.2        # 段 N（基线：越界帧 88/101、实例 537、重叠帧 1 @205.9）
+[scan] 步长 0.2s 共 101 帧：越界帧 0/101、越界实例 0、重叠帧 0/101、重叠实例 0
+
+$ node .scratch_layers.mjs scan 0.2                # 全片
+[scan] 步长 0.2s 共 1060 帧，全片命中 0 帧
+[panels] 全片出现 38 块面板，失败 0 组
+  OK nestedWindow:handoff      [screen/stage] 191–193s     ×11帧 盒1 minPad=-0.3/0 越界0 矩形450×47
+  OK nestedWindow:session #002 [screen/stage] 193.4–206.2s ×65帧 盒1 minPad=-0.3/0 越界0 矩形732×47
+
+$ node .scratch_layers.mjs gscan 0.2               # 全片 1060 帧 / 377.6s / 1920×1080
+  PASS g2  全片除歌词层外无汉字
+  PASS g3  任一帧都没有重名主体
+  FAIL g4  2 个拨杆/摇杆：b:pendulum[capsule+knob](14.6–18s) | b:fourier[capsule+knob](18.6–22.4s)
+  PASS g5  舞台文字（除歌词层）x∈[5%,95%]、y∈[8%,80%] 全片成立（1920×1080）
+  PASS g6  最强 2s 窗口交替 0Hz（上限 2.5Hz，摆幅 0.90879）；最坏窗口 143.9–145.9s
+  PASS g9  无太阳结构
+
+$ node .scratch_t53.mjs 191.2,192.2,193.8,196.0,198.3,201.0,205.6,205.96,206.4,209.4
+                                                # 真 GPU ANGLE (AMD, AMD Radeon(TM) Graphics, Direct3D11 vs_5_0 ps_5_0)
+每帧 errors=0 / 违规 0 / 重叠 0；mean 1.8–11.9ms
+heartSpin 0.213544   heartYawGapAtLast 0
+heartYawGap 3.13043(191.2) 2.93921 2.59754(193.8) 2.12775(196.0) 1.6366(198.3) 1.06003(201.0) 0.07773(205.6) 0.00085(205.96) 0.09311(206.4)
+t191.2 卡片 handoff.md px40 x0.065-0.19 y0.255-0.298 ｜ t192.2 四行 x0.065-0.277 y0.255-0.481（中央无 handoff.md 盒）
+t193.8 起只剩 session #002 x0.581-0.937 ｜ t205.96 world.execute(me); px30 y0.729-0.761 ｜ t206.4 无文字盒、layers 只剩 lyrics
+```
+
+### T53 的关键结论
+
+1. **3:11 的「过大」与 FIX_V4 §1.15 的「高 ≥38%H / 文字 ≥36px」不冲突**：V4 要"别太小"、V5 要"别过大 ⇒ 按 G1 自适应"。取 V5（新稿最高优先级），但把 V4 的数字也满足：40px 字 + 66px 行距 ⇒ 418px = 38.7%H，宽度按内容从 595px 收到 450px（无空白块），x 5.5–29.0%W ⊂ [3%,34%]，5 行，到爱心中心最近距离 404px > 302px。
+2. **3:12 的删除对象只是那个黑底黄边窗口**：`handoff.md` 作为发光彗星带拖尾从爱心飞向新窗口是 V4 §1.15 明确要的运动 ⇒ 删盒子、留彗星；实测 192.2 帧中央已无 `handoff.md` 文字盒，叙事完整。
+3. **3:13 的「删除」必须整函数删**：旧 `drawOldWindow` 的横线窗是 193.5–205.9 每帧 5–6 处 g5 左越界的根源（基线 537 个越界实例里绝大多数来自它），缩小它等于留着越界源。
+4. **3:25.96 的自动键入并入 SESSION 窗末行后，205.9 那 1 处重叠消失**：旧 `drawFinalExecution` 是 560×48 独立盒子 @0.70H，正好压住窗口末行 `restored…`（唯一重叠根因），且 20px < G1 下限 30px；并入末行后 30px 且在窗内 ⇒ 重叠 0。
+5. **yaw 的唯一解是整圈数**：`rotation.y = t·spin` 要"匀速"+"205.964 时 ≡0 mod 2π" ⇒ `spin = 2πk/205.964`；k=7（0.213544）与旧 0.22 只差 2.9%，观感不变；公式在共享 `heart3d.update()` 里、段 M 共用 ⇒ 只在段 N 的传参处解。
+6. **3:27 的淡出窗由「图标首帧」反推**：电源图标画在 `if (freeze>0.5)`、`freeze=span(t,205.96,206.6)` ⇒ 首帧 = 206.28 ⇒ 窗口淡出窗 [205.98,206.28]；若字面直接用 `freeze`，205.96–206.28 之间会出现"窗口与图标同框"。
+7. **全片 g5 就此清零**：T52 遗留的 562 帧次（最早 191.0s = 段 N）全部来自段 N 的左侧交接卡（x 1.1%）、左侧横线窗、右侧 SESSION 窗（x2 95.4%）、顶部 68px 大字（y 6.9%）——四处本轮一起修 ⇒ gscan **g5 PASS**、全片 1060 帧文字重叠 0、面板 38 块失败 0。g4 仍是段 B 的 2 处（T42 已登记，判据未动）。
+8. **T52 遗留②（蜂群心形 = 第二套爱心）结案：不改**。FIX_V4 §1.13 要"由字符粒子构成的蓝色粒子爱心"、§1.14 要段 N"核心有白热光芯、轮廓用更亮的发光管勾出、心跳冲击波环、火花" ⇒ 蜂群粉心与 N 段白核/线条轮廓都是规格要的；§M 3:02 的"只保留一套"= 段 M 那一帧内不要同时出现多颗离散心形物体，已由 `whiteCore/lineOutline/solidInner` 开关（M 段关、N 段默认开）精确落实 ⇒ 无需改 `SEGMENT_SWARM`（改它还会连带 N 的 `from:'heart'`，违反规则⑥）。
+
+## 决策日志（R14：T53 段 N）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R14-D1 | 交接卡按内容自适应（40px / 66px 行距 ⇒ 450×418） | 3:11 要"按 G1 自适应缩小、文字以窗口内可读为准"；同时满足 V4 §1.15 的 ≥36px、≤5 行、x∈[3%,34%]、≥38%H | 恢复固定 595×454 / 36px |
+| R14-D2 | 3:12 只删黑底金边盒子，保留彗星辉光与拖尾 | 规格删的是「窗口」；`handoff.md` 做成发光彗星带拖尾是 V4 §1.15 明确的运动，删了就没有"飞进新窗口"的叙事 | 恢复 240×86 盒子 + `fillText('handoff.md')` |
+| R14-D3 | 3:13 整函数删除 `drawOldWindow`（而不是缩小） | 规格说"删除左侧重新出现的那个带一堆横线的窗口"；它每帧 5–6 处 g5 左越界 | 从 git 恢复函数与调用 |
+| R14-D4 | 3:25.96 的自动键入并入 SESSION 窗末行（30px） | 旧独立盒子 560×48 @0.70H 压住窗口末行 = 205.9 唯一重叠根因；旧 20px < G1 下限 30px | 恢复 `drawFinalExecution` |
+| R14-D5 | 打字起点 205.5（而非窗口一出现就打） | 对齐 `lastExec` 205.964 的可见窗口，205.9 打完、205.96 整行在屏 | 改 `start` |
+| R14-D6 | `spin = 7·2π/205.964 = 0.213544` | "匀速自转"+"205.964 ≡ 0 mod 2π"的唯一解族 `2πk/T`；k=7 与旧 0.22 差 2.9%；共享库公式不动（段 M 共用） | 改 k 或恢复 0.22 |
+| R14-D7 | 淡出窗 [205.98, 206.28] | 由电源图标 `freeze>0.5` 首帧 206.28 反推"图标出现的同一时刻已消失" | 改两端时间 |
+| R14-D8 | 立绘与窗口 0.2s 低透明交叉保持不动、不提前淡出立绘 | 交叉窗内两侧各 ≤25% 不构成 G1 的"面板遮挡立绘"；提前淡出立绘会改段 M/N 切换观感 | 调交叉窗 |
+| R14-D9 | SESSION 窗宽 732px（按内容），不套用 V4 §1.15 的 `x∈[66%,97%]`（557px）带 | 该带与 V4 自身要求互斥：≥36px + 固定串 `restored: 1 item (unreadable) ♥` 实测 683–742px > 557px；按 V5「按 G1 自适应」定宽，右缘仍贴 95%W、下缘 79%H 的右下位 | 改 `x` 表达式 |
+| R14-D10 | 判据文件与 `tools/selftest.mjs` 一个字不动 | 改判据/阈值＝放宽门槛（本轮 g5 结论如实上报：全片清零） | — |
+
+### 仍未完成 / 已知问题（T53 之后）
+
+1. 全片 gscan 仍 **g4 FAIL 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，属段 B）：T42 已登记为"不改检测器"的遗留项，判据未动。
+2. **FIX_V5 §3 的新增自检尚未进 `src/ui/globalrules.js`**：`心脏 yaw(205.964) mod 2π <0.05rad`（本轮只在场景 metrics 暴露 `heartYawGapAtLast = 0`，未写进判据）、以及 §3 的 prism / CRT 检查项 ⇒ T55 前遗留（写判据＝改判据文件，本轮明确不做）。
+3. 段 N（与段 M）**未跑全量 `?selftest`**（只跑定点 10 帧 + 段内 0.2s/101 帧枚举 + 全片 scan/gscan）——**未验证项**，留 T55。
+4. 全片导出未跑（≈31 分钟）留到 T55 终验。
+5. T52 遗留①（g5 562 帧次）本轮清零；遗留②（蜂群心形）本轮回填结论 = 不改；遗留③④与上面第 3/4 条相同。
+6. 本轮改动（`src/scenes/n_handoff.js` 为主）与 T40–T52 的改动**仍未提交**；新增临时探针 `.scratch_t53.mjs`（gitignore）、证据目录 `out/t53/`（gitignore）。
+
+## T54 [S] CRT 开关机（FIX_V5 G7；§N 末行「片头/片尾 CRT:按 G7 重做,不压扁内容」）— 已完成
+
+完成定义是「`npm run doctor` PASS 5 / FAIL 0；受改动影响的区间（片头 0–1s、片尾 209–211.9s）在 0.2s 采样下 `errors=0`、文字越界 0、重叠 0；写 `docs/REVIEW_T54.md`（词→事件→对象 + 6 关键帧）；不跑全量 `?selftest`；判据/阈值一个字未改」。
+
+改：`src/core/compositor.js applyPost()`（CRT 从纵向缩放改成 1:1 直绘 + 对称黑幕布 + 带边亮线）、`src/core/fx.js crt()`（新增 `line`）、`src/main.js:340`（注入 `crtLine`）。
+
+```text
+$ npm run doctor
+PASS  a vite build  构建通过
+PASS  b1 node --check  75 个 src/*.js 全部通过
+PASS  b2 import 检查  74 个模块全部可 import
+PASS  c 编码检查  扫描 147 个文件 | PASS  无 U+FFFD / 无 BOM / 换行统一
+PASS  d __errors 为空  window.__errors 为空
+== 汇总：PASS 5  FAIL 0  SKIP 0 ==
+
+$ node .scratch_crt.mjs            # G7 判别实验（真 GPU ANGLE AMD D3D11）
+[T54/G7] renderer = ANGLE (AMD, AMD Radeon(TM) Graphics (0x0000164C) Direct3D11 vs_5_0 ps_5_0, D3D11)
+t=0      lv=0       line=1   带=4px@538   diffSame=47.75 diffScale=19.92 ratio=0.42  幕布上/下=2.17/2.81 亮线行=173.53 带中=133.48 errors=0
+t=0.32   lv=0.0364  line=1   带=39px@521  diffSame=8.12  diffScale=29.47 ratio=3.63  幕布上/下=2.13/1.19 亮线行=175.42 带中=58.66  errors=0
+t=0.5    lv=0.3636  line=1   带=393px@344 diffSame=3.26  diffScale=21.46 ratio=6.59  幕布上/下=2.1/1.25  亮线行=170.34 带中=58.01  errors=0
+t=0.7    lv=0.7273  line=1   带=785px@148 diffSame=2.75  diffScale=17.74 ratio=6.46  幕布上/下=2.08/1.27 亮线行=151.66 带中=58.97  errors=0
+t=0.85   lv=1       line=1   带=1080px@0  diffSame=0     diffScale=0     ratio=0     幕布上/下=20.2/8.89 亮线行=19.45  带中=55.93  errors=0
+t=209    lv=1       line=1   带=1080px@0  diffSame=0     diffScale=0     ratio=0     幕布上/下=5.03/5.27 亮线行=4.99   带中=10.02  errors=0
+t=209.4  lv=0.6522  line=1   带=704px@188 diffSame=0.98  diffScale=1.9   ratio=1.95  幕布上/下=0.92/1.03 亮线行=150.73 带中=8.05   errors=0
+t=209.8  lv=0.3043  line=1   带=329px@376 diffSame=1.52  diffScale=3.27  ratio=2.16  幕布上/下=0.92/1.03 亮线行=163.04 带中=10.94  errors=0
+t=210.15 lv=0       line=1   带=4px@538   diffSame=5.08  diffScale=2.28  ratio=0.45  幕布上/下=0.82/0.92 亮线行=95.75  带中=73.91  errors=0
+t=210.4  lv=0       line=0   带=4px@538   diffSame=1.63  diffScale=0.94  ratio=0.58  幕布上/下=0/0      亮线行=1.63   带中=1.31   errors=0
+
+$ node .scratch_t51scan.mjs 0 1 0.2          # 片头 0–1s
+[t51scan] 0→1 步长 0.2s：6 帧
+  越界帧 0/6，越界实例 0（口径 = safeAreaViolations：[5%,95%]×[8%,80%]）
+  文字重叠帧 0/6，重叠实例 0（口径 = findTextOverlaps(0.1)）
+$ node .scratch_t51scan.mjs 209 211.9 0.2    # 片尾 209–211.9s
+[t51scan] 209→211.9 步长 0.2s：15 帧
+  越界帧 0/15，越界实例 0
+  文字重叠帧 0/15，重叠实例 0
+```
+
+### T54 的关键结论
+
+1. **根因是"把 CRT 展开度当垂直缩放"**：旧 `applyPost` 的 `sy = crt`、`translate(0,H/2)→scale(1,sy)→translate(0,-H/2)` 把 1920×1080 的内容压成 1920×(1080·crt) ⇒ 片头 0.5s 时画面只剩 39% 高、纵横比 1.78→4.56 = G7 明令禁止的"压扁/缩放"；旧实现还在 `edge=(H/2)(1-sy)` 画两条亮线，把"亮线"误当成"压扁后的边缘"。
+2. **改法是最小替换**：不动 `open`(0.30→0.85)/`close`(209.0→210.15) 的时序与数值，只把"缩放"换成"**1:1 直绘 + 对称黑幕布 `fillRect` + 带边 2px 亮线/内侧辉光**" ⇒ 原来的开关节奏、观感与 G7 兼容；`openCrt>=0.999` 走快路径（不画幕布、不增强扫描线）⇒ **全开帧与改动前逐像素一致**（实测 t=0.85/209 `diffSame=diffScale=0`）。
+3. **"再熄灭"是旧实现缺的最后一步**：`level` 的下限 `0.004` 让亮线在片尾永不消失（G7 要"合拢成亮线**再熄灭**"）⇒ 新增独立通道 `fx.crt(t).line = 1−clamp((t−210.15)/0.25)`，乘到两条亮线与辉光的 alpha 上；实测 210.4 `line=0`、亮线行均值 1.63、带中 1.31（全黑）。选择独立 `line` 而不是让 `level` 收尾到 0：`level=0` 会让幕布完全闭合、失去 G7 要的"亮线"这一中间态（210.15 时带 4px、亮线行均值 95.75 仍在）。
+4. **验证方法是判别实验而不是单帧目测**：只看 B 的带内像素无法区分"裁剪"与"缩放"，故同 t 渲染 A（强制全开）/B（自然），比较 B 可见带与 A **同区间**（`diffSame`）和与 A **按旧缩放假设重采样**（`diffScale`）；实测部分开合帧 `ratio=diffScale/diffSame` **1.95–6.59** ⇒ "同区间"假设显著更优 = 内容未经缩放；幕布行均值 0.82–2.81（近纯黑）；全 10 帧 `errors=0`。
+5. **字幕不在幕布裁剪范围内**：`ctx.overlay`（credits）画在 `#stage`、在 `post()` **之后** ⇒ 片尾幕布合拢时字幕仍完整可见（与 `src/main.js:360` 原注释的层次约定一致）；G7 只约束"画面内容"的纵横比，故不动层次。
+
+## 决策日志（R15：T54 [S] CRT 开关机）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R15-D1 | 用「1:1 直绘 + 对称黑幕布」替换纵向缩放 | G7 明令"不得压扁/缩放画面内容……用裁剪/遮罩"；判别实验 ratio 1.95–6.59 证明内容未缩放 | 恢复 `sy`/`translate`+`scale` |
+| R15-D2 | 不改 `open`/`close` 的时序与取值（0.30–0.85 / 209.0–210.15） | 只换实现、不连带片头片尾节奏与 `setCrtLevel()` 演示钩子；判据/阈值不动 | 改两个时间窗 |
+| R15-D3 | 新增独立 `crtLine` 通道（210.15→210.40 熄灭），而不是让 `level` 收尾到 0 | `level=0` 会使幕布完全闭合、丢掉 G7 要的"合拢成亮线"中间态；`line` 与开合度解耦 ⇒ 关机的"合拢→成线→熄灭"三步齐全 | 删 `crtLine`、恢复常数 alpha |
+| R15-D4 | 幕布恒为纯黑（不随 `line` 淡出），只有亮线/辉光乘 `crtLine` | "熄灭"熄灭的是那条亮线，幕布本就该是黑的 | 把 `line` 乘到幕布 alpha |
+| R15-D5 | 不对字幕层做遮挡/裁剪 | credits 在 `post()` 之后绘制是既有层次约定（`src/main.js:360` 注释），G7 只约束画面内容纵横比 | 把 overlay 移进 post |
+| R15-D6 | `src/ui/globalrules.js` / `src/ui/text.js` / `tools/selftest.mjs` 一个字不动 | 改判据/阈值/检测器＝放宽门槛；G7 的 §3 自检项（`CRT 开关机帧中画面内容的纵横比不变`）登记为 T55 遗留 | — |
+
+### 仍未完成 / 已知问题（T54 之后）
+
+1. **FIX_V5 §3 的新增自检仍未进 `src/ui/globalrules.js`**：`心脏 yaw(205.964) mod 2π <0.05rad`、`CRT 开关机帧中画面内容的纵横比不变(G7)`、prism 项 ⇒ T55 前遗留（写判据＝改判据文件，本轮明确不做）。
+2. 队列只剩 **T55 终验**：分段跑全量 `?selftest`（含 FIX_V5 §3）+ 完整导出一次 MP4 并汇报耗时与产物路径。
+3. **用户新指令（本轮 m05344/m05345/m05346）带来的额外工作**（已建活跃目标 `goal-1bdfb30e-1986-4e1d-be93-35a3391ce920`）：① 先完成 T54（本条已闭环）；② 修复本轮遇到的 bug —— `npm run check` §6「src/ 无歌词原文」6 处（既有基线，均在注释里）、T53 面板审计 `nestedWindow minPad=-0.3`（标题栏 `pad:0` 口径，与其它标题一致）、全片 gscan **g4 段 B 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，T42 已登记"不改检测器"）、`?shot ≥211.3` 字节相同帧；③ 把**完整影片以 4K 60fps 导出到桌面**并汇报路径与耗时（原 T55 的"完整导出"目标随此指令升级为 4K60 + 落桌面）。
+4. 全量 `?selftest`（分段）仍未跑，留 T55 终验。
+5. 本轮改动（`src/core/compositor.js`、`src/core/fx.js`、`src/main.js`）与 T40–T53 的改动**仍未 git 提交**；新增临时探针 `.scratch_crt.mjs`（gitignore）、证据目录 `out/t54/`（gitignore）。

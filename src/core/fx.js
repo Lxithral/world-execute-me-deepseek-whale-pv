@@ -130,12 +130,20 @@ export const fx = {
     return out.sort((x, y) => x - y)
   },
 
-  /** CRT 开关：0.30s 亮线展开开机；209.0s 收缩关机（DIRECTOR 段 A / 段 N） */
+  /** CRT 开关：0.30s 亮线展开开机；209.0s 收缩关机（DIRECTOR 段 A / 段 N）
+   *  G7：开关机一律交给 compositor 用「裁剪/幕布」实现（内容 1:1，不缩放）；
+   *  `line` = 亮线亮度 —— 关机时幕布合拢成一条亮线后，这条线还要熄灭。 */
   crt(t) {
     const open = t >= 0.3 ? Math.min(1, (t - 0.3) / 0.55) : 0
     const close = t >= 209.0 ? Math.min(1, (t - 209.0) / 1.15) : 0
     const lv = open * (1 - close)
-    return { open, close, level: crtLevelOverride == null ? lv : crtLevelOverride }
+    const line = 1 - Math.max(0, Math.min(1, (t - 210.15) / 0.25))
+    return {
+      open,
+      close,
+      line: crtLevelOverride == null ? line : 1,
+      level: crtLevelOverride == null ? lv : crtLevelOverride,
+    }
   },
 
   /** 全屏黑场由场景自己绘制（段 J 的 2:26.5、段 N 的 3:29 之后），

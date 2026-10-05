@@ -12,6 +12,9 @@ const MONO_F = MONO
 export const LOVE_CODE = [
   '# a function that was never called twice',
   'def love(x, t):',
+  // T52 / FIX_V5 §M 3:02：画面左半边那颗大号心形方程被删除，改写进 `def love()` 的函数体，
+  // 作为一行真正的代码（心的隐式曲面方程）。
+  '    return (x**2 + 9/4*y**2 + z**2 - 1)**3 - x**2*z**3 - 9/80*y**2*z**3',
   '    """return the smallest thing that still means you."""',
   '    if t < 1:',
   '        return remember(x)',

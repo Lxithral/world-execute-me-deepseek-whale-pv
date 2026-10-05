@@ -20,17 +20,35 @@
 //   · 不得出现 official mark / scene xxx / web#001 等开发字符串
 
 import * as THREE from 'three'
-import { text, FONT, TEXT_MIN, setTextureSpace, isTextureSpace } from '../../ui/text.js'
+import { text, FONT, TEXT_MIN, setTextureSpace, isTextureSpace, beginPanel, endPanel } from '../../ui/text.js'
 import { drawFishLogo } from '../../ui/logo.js'
 import { clamp } from '../../core/ease.js'
 
-/** 画布与面板尺寸（§2.2 规定 1024×640） */
+/** 画布与面板尺寸（§2.2 规定 1024×640；G1 要求纹理宽 ≥2048 → 画布按 SCALE 超采样） */
 export const PANE_W = 1024
 export const PANE_H = 640
+/**
+ * G1（FIX_V5 §0）：超采样倍数。
+ * 画布 = 逻辑尺寸 × SCALE = **2048×1280**（满足「纹理宽 ≥2048」），绘制时
+ * `setTransform(SCALE,…)`，于是全部排版常量仍按 §2.2 的 1024×640 逻辑坐标写。
+ * 这样面板清晰度不再依赖 DPR（DPR 降档也不会变糊），字号仍是 30–40px 的**逻辑**口径。
+ */
+export const SCALE = 2
+/** §G3：逐实例唯一的网格名序号（同会话号可能有多块屏）。 */
+let termpaneSeq = 0
+/** G1：内容到窗口边缘的内边距（逻辑 px） */
+const PAD = 24
+/** 窗口最小宽度（逻辑 px）：至少要放得下标题栏的 logo + dsh 徽标 */
+const MIN_W = 320
 /** 标题栏高度（§2.2） */
 export const TITLE_H = 56
+/** 标题字号（G1：终端面板字号 30–40px） */
+const TITLE_PX = 34
+/** 副标题字号（G1：不得低于 30px） */
+const SUB_PX = 30
 /** 正文行高与字号（T03b：FIX_V4 §2.3 要求**面板类文字最小 34px**，优先于 V3 §2.2 的 ≥30px） */
-// 版式核对：MAX_LINES(7) × LINE_H(48) = 336，加 TITLE_H(56) 与内边距仍远小于 PANE_H(640)，不会溢出。
+// 版式核对：窗口高 = TITLE_H + PAD×2 + MAX_LINES(7)×LINE_H(48) = 440 ≤ PANE_H(640)，
+// 且首行盒顶距标题栏底 = PAD(24)、末行盒底距窗口底 = 32.6 —— 都在 24px 内边距之上。
 const BODY_PX = 34
 const LINE_H = 48
 /** 一屏最多几行（§2.2） */
@@ -84,44 +102,58 @@ function wrapLine(g, str, maxW) {
 /**
  * 建一块终端屏。
  * @param {{renderer?:THREE.WebGLRenderer, session?:string, side?:'L'|'R',
- *          width?:number, height?:number, role?:'pane'|'decor'}} [opts]
+ *          width?:number, height?:number, role?:'pane'|'decor',
+ *          name?:string, maxWinW?:number}} [opts]
+ *   `maxWinW`：逻辑窗口宽度上限（默认 PANE_W = 1024）。
+ *   G1 的清晰度判据是「**上屏**字号 30–40px」，而 pane 的 `PX2WORLD` 是定值 ⇒ 上屏比例
+ *   与窗口宽度无关；要在大字号的左带里放得下，就必须把逻辑窗口收窄（多换行、窗口变高），
+ *   再让调用点把整机放大到构图允许的上屏宽。见段 F 的调用点。
  */
 export function createTermPane(opts = {}) {
-  const { session = '#001', side = 'L' } = opts
+  const { session = '#001', side = 'L', maxWinW = PANE_W } = opts
+  // G1：逻辑窗口宽度上限（≥MIN_W，≤画布逻辑宽）；只影响换行预算与窗口宽度，不改字号
+  const WIN_CAP = Math.max(MIN_W, Math.min(PANE_W, maxWinW))
   const grp = new THREE.Group()
   grp.name = `termpane:${session}`
 
-  /* ---------- 画布与纹理 ---------- */
+  /* ---------- 画布与纹理（G1：纹理宽 ≥2048、各向异性 16、开 mipmap） ---------- */
   const cv = document.createElement('canvas')
-  cv.width = PANE_W
-  cv.height = PANE_H
+  // G1（FIX_V5 §0）：纹理宽 ≥2048 → 画布 = 逻辑尺寸 × SCALE（即 2048×1280）
+  cv.width = PANE_W * SCALE
+  cv.height = PANE_H * SCALE
   const g = cv.getContext('2d')
   const tex = new THREE.CanvasTexture(cv)
   tex.colorSpace = THREE.SRGBColorSpace
-  tex.generateMipmaps = false
-  tex.minFilter = THREE.LinearFilter
+  // G1：面板是斜着看的贴图 → 必须开 mipmap + 各向异性 16，否则斜视/远处必糊（用户多次反馈）
+  tex.generateMipmaps = true
+  tex.minFilter = THREE.LinearMipmapLinearFilter
   tex.magFilter = THREE.LinearFilter
+  tex.anisotropy = 16
 
-  /* ---------- 平面 ---------- */
-  // 世界尺寸：画布 1024×640 → 世界 0.96×0.60（1 世界单位 = 半屏高，1080 下约 540px）
-  // 于是面板在屏幕上约 518×324 px = 1920×1080 的 **8.1%** 面积，
-  // 远低于 §2.4 的"单块 pane ≤22%"上限。
-  const worldW = 0.96
-  const worldH = worldW * (PANE_H / PANE_W)
+  /* ---------- 平面（G1：窗口尺寸由内容决定 → 世界尺寸随内容变化） ---------- */
+  // 满宽 1024 逻辑 px ↔ 0.96 世界单位（与 §2.4 的旧口径一致）
+  const PX2WORLD = 0.96 / PANE_W
+  let worldW = 0.96
+  let worldH = worldW * (PANE_H / PANE_W)
   const mat = new THREE.MeshBasicMaterial({
     map: tex,
     transparent: true, // α0.55 的暗底，能透出后面的 3D
     depthWrite: false, // §2.4：pane 一律 depthWrite 关
     depthTest: true, // §2.4：depthTest 开，于是会被写深度的主角遮住
     side: THREE.FrontSide,
+    toneMapped: false, // G1：不受色调映射影响（否则面板会随曝光发灰、被后处理洗白）
   })
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(worldW, worldH), mat)
-  mesh.name = `termpaneMesh:${session}`
+  // T42 / §G3：逐实例唯一名。同一时刻可能有多块屏显示**同一个会话号**（段 J 的三块都是 #001），
+  // 旧的 `termpaneMesh:#001` 会让「按对象名统计重名主体」的自检误报。
+  mesh.name = opts.name || `termpaneMesh:${session}#${++termpaneSeq}`
   // §2.4：renderOrder 低于主角（主角默认 0/5），pane 用负值确保先画
   mesh.renderOrder = -2
   // §2.4：声明 role，供遮挡规则与 selftest q 项读取
   mesh.userData.role = opts.role || 'pane'
   mesh.userData.isPane = true
+  // G1：面板不参与 bloom / 径向模糊 / 色调映射（compositor + post3d 按这个标记分流）
+  mesh.userData.noPost = true
   grp.add(mesh)
 
   /* ---------- 状态 ---------- */
@@ -187,31 +219,114 @@ export function createTermPane(opts = {}) {
     if (glitchAmt <= 0.01) return
     if (!glitchCv) {
       glitchCv = document.createElement('canvas')
-      glitchCv.width = PANE_W
-      glitchCv.height = PANE_H
+      glitchCv.width = cv.width
+      glitchCv.height = cv.height
       glitchG = glitchCv.getContext('2d', { willReadFrequently: true })
     }
+    // 这一段全在**设备像素**里做（画布 2048×1280）→ 临时把变换重置，结束时还原
+    const W = cv.width
+    const H = cv.height
+    g.save()
+    g.setTransform(1, 0, 0, 1, 0, 0)
     glitchG.setTransform(1, 0, 0, 1, 0, 0)
-    glitchG.clearRect(0, 0, PANE_W, PANE_H)
+    glitchG.clearRect(0, 0, W, H)
     glitchG.drawImage(cv, 0, 0)
     const bands = 5
-    const shift = Math.round(glitchAmt * 46)
-    g.save()
+    const shift = Math.round(glitchAmt * 46 * SCALE)
     g.globalCompositeOperation = 'copy'
     g.drawImage(glitchCv, 0, 0)
     g.restore()
     for (let b = 1; b < bands; b += 2) {
-      const y = Math.round((b / bands) * PANE_H)
-      const h = Math.round(PANE_H / bands)
+      const y = Math.round((b / bands) * H)
+      const h = Math.round(H / bands)
       const dx = b % 4 === 1 ? shift : -shift
       g.save()
+      g.setTransform(1, 0, 0, 1, 0, 0)
       g.beginPath()
-      g.rect(0, y, PANE_W, h)
+      g.rect(0, y, W, h)
       g.clip()
-      g.clearRect(0, y, PANE_W, h)
-      g.drawImage(glitchCv, dx, y, PANE_W, h, 0, y, PANE_W, h)
+      g.clearRect(0, y, W, h)
+      g.drawImage(glitchCv, dx, y, W, h, 0, y, W, h)
       g.restore()
     }
+  }
+
+  /* ---------- G1：窗口尺寸 = 内容 + 两侧 24px 内边距 ---------- */
+  /** 逻辑坐标下的窗口尺寸（画布左上角 (0,0)..(winW,winH)，再 ×SCALE 换成设备像素） */
+  let winW = MIN_W
+  let winH = TITLE_H + PAD * 2 + LINE_H
+  /** 窗口尺寸变化时的回调（monitor 用它重建机身外壳） */
+  let onResize = null
+
+  /** 正文可用的最大行宽：面板满宽减去两侧内边距与最长前缀（保证换行后一定放得下） */
+  function wrapBudget() {
+    g.save()
+    g.font = `500 ${BODY_PX}px ${FONT.code}`
+    let prefixMax = 0
+    for (const k of Object.keys(ROW_STYLE)) {
+      const p = ROW_STYLE[k].prefix
+      if (p) prefixMax = Math.max(prefixMax, g.measureText(p).width + 12)
+    }
+    g.restore()
+    return Math.max(180, WIN_CAP - PAD * 2 - prefixMax)
+  }
+
+  /** 正文实际占用的最大宽度（含前缀；rows 已按 wrapBudget 折过行） */
+  function bodyWidth() {
+    g.save()
+    g.font = `500 ${BODY_PX}px ${FONT.code}`
+    let maxW = 0
+    for (let i = 0; i < rows.length && i < MAX_LINES; i++) {
+      const st = styleOf(rows[i].kind)
+      const pw = st.prefix ? g.measureText(st.prefix).width + 12 : 0
+      maxW = Math.max(maxW, pw + g.measureText(rows[i].text).width)
+    }
+    g.restore()
+    return maxW
+  }
+
+  /** 标题栏需要的最小宽度（logo + dsh + subtitle；会话号过长时走截断，不撑宽窗口） */
+  function titleMinWidth() {
+    g.save()
+    g.font = `600 ${TITLE_PX}px ${FONT.brand}`
+    let w = 52 + g.measureText('dsh').width
+    if (title.subtitle) {
+      g.font = `500 ${SUB_PX}px ${FONT.code}`
+      w = Math.max(w, 120 + g.measureText(title.subtitle).width)
+    }
+    g.restore()
+    return w + PAD + 8
+  }
+
+  /** G1：先 measureText 排版 → 内容宽高 + 两侧 24px 内边距 → 窗口尺寸（宽受 WIN_CAP 约束） */
+  function layoutWindow() {
+    const n = Math.min(rows.length, MAX_LINES)
+    const w = Math.max(bodyWidth() + PAD * 2, titleMinWidth())
+    winW = Math.max(MIN_W, Math.min(WIN_CAP, Math.ceil(w)))
+    winH = Math.max(TITLE_H + PAD * 2 + LINE_H, Math.min(PANE_H, TITLE_H + PAD * 2 + Math.max(LINE_H, n * LINE_H)))
+  }
+
+  /**
+   * 把窗口尺寸同步到 3D：平面世界尺寸 = 窗口 × PX2WORLD，
+   * 并把 UV 收缩到画布左上角的窗口区域（画布整张 2048×1280，窗口之外保持透明）。
+   */
+  function applySize() {
+    const w = winW * PX2WORLD
+    const h = winH * PX2WORLD
+    if (Math.abs(w - worldW) < 1e-4 && Math.abs(h - worldH) < 1e-4) return
+    worldW = w
+    worldH = h
+    mesh.geometry.dispose()
+    mesh.geometry = new THREE.PlaneGeometry(worldW, worldH)
+    const uv = mesh.geometry.attributes.uv
+    const u1 = (winW * SCALE) / cv.width
+    const v1 = 1 - (winH * SCALE) / cv.height
+    uv.setXY(0, 0, 1)
+    uv.setXY(1, u1, 1)
+    uv.setXY(2, 0, v1)
+    uv.setXY(3, u1, v1)
+    uv.needsUpdate = true
+    if (onResize) onResize({ width: worldW, height: worldH, winW, winH })
   }
 
   /* ---------- 绘制 ---------- */
@@ -219,29 +334,55 @@ export function createTermPane(opts = {}) {
     // 这块 canvas 是贴图：坐标与屏幕无关 → 期间关闭 §2.8 的屏幕包围盒登记
     const prevTS = isTextureSpace()
     setTextureSpace(true)
-    g.setTransform(1, 0, 0, 1, 0, 0)
+    // G1：画布是 2048×1280，绘制一律在 §2.2 的 1024×640 逻辑坐标里做
+    g.setTransform(SCALE, 0, 0, SCALE, 0, 0)
     g.clearRect(0, 0, PANE_W, PANE_H)
+
+    // G1：先按内容排版算窗口，再把窗口同步到 3D 平面
+    layoutWindow()
+    applySize()
+
+    // G1（FIX_V5 §0）：面板作用域 —— 期间登记的文字盒必须落在这块窗口内且留够 24px 内边距
+    beginPanel(g, { x: 0, y: 0, w: winW, h: winH }, { pad: PAD, id: `termpane:${title.session}`, title: title.session })
 
     // 背景（§2.2：rgba(21,21,23,0.55)）
     g.fillStyle = 'rgba(21,21,23,0.55)'
-    g.fillRect(0, 0, PANE_W, PANE_H)
+    g.fillRect(0, 0, winW, winH)
 
-    // 标题栏
+    // 标题栏（chrome：G1 只要求"文字不越出标题栏"，标题栏本身是窗口内的一条 → pad 不适用）
+    beginPanel(g, { x: 0, y: 0, w: winW, h: TITLE_H }, { pad: 0, id: `termpane:${title.session}/title`, title: title.session })
     g.fillStyle = 'rgba(28,28,32,0.72)'
-    g.fillRect(0, 0, PANE_W, TITLE_H)
+    g.fillRect(0, 0, winW, TITLE_H)
     // 官方 logo（§5.10：用真实 SVG path，不得自己重画）+ dsh 徽标 + 会话号
-    drawFishLogo(g, 20, 16, 24, '#7aaaff')
-    text(g, 'dsh', 54, TITLE_H / 2, { role: 'ui', size: 34, family: 'brand', weight: 600, color: '#e8eaee', align: 'left', baseline: 'middle' })
-    text(g, title.session, PANE_W - 20, TITLE_H / 2, {
-      role: 'ui', size: 34, family: 'code', weight: 600, color: '#7aaaff', align: 'right', baseline: 'middle',
-    })
+    drawFishLogo(g, 16, 16, 24, '#7aaaff')
+    g.save()
+    g.font = `600 ${TITLE_PX}px ${FONT.brand}`
+    const dshW = 52 + g.measureText('dsh').width
+    g.restore()
+    text(g, 'dsh', 52, TITLE_H / 2, { role: 'ui', size: TITLE_PX, family: 'brand', weight: 600, color: '#e8eaee', align: 'left', baseline: 'middle' })
+    let subW = 0
     if (title.subtitle) {
-      text(g, title.subtitle, 120, TITLE_H / 2, { role: 'label', size: 22, family: 'code', color: '#9aa1ab', align: 'left', baseline: 'middle' })
+      g.save()
+      g.font = `500 ${SUB_PX}px ${FONT.code}`
+      subW = g.measureText(title.subtitle).width
+      g.restore()
+      text(g, title.subtitle, 120, TITLE_H / 2, { role: 'label', size: SUB_PX, family: 'code', color: '#9aa1ab', align: 'left', baseline: 'middle' })
     }
+    // 会话号：先测宽，过长截断加省略号（G1：标题栏文字绝不超出标题栏）
+    g.save()
+    g.font = `600 ${TITLE_PX}px ${FONT.code}`
+    const sessMax = Math.max(40, winW - PAD - Math.max(dshW + 12, (title.subtitle ? 120 + subW : 0) + 12))
+    let sess = String(title.session)
+    while (sess.length > 2 && g.measureText(sess).width > sessMax) sess = sess.slice(0, -2) + '…'
+    g.restore()
+    text(g, sess, winW - PAD, TITLE_H / 2, {
+      role: 'ui', size: TITLE_PX, family: 'code', weight: 600, color: '#7aaaff', align: 'right', baseline: 'middle',
+    })
+    endPanel(g)
 
     // 正文：行 y 坐标严格递增（这是"绝不叠行"的结构性保证）
-    const y0 = TITLE_H + LINE_H * 0.9
-    const maxW = PANE_W - 48
+    // G1：首行盒顶 = TITLE_H + PAD，末行盒底到窗口底 ≥ 24px（见 layoutWindow 的 winH）
+    const y0 = TITLE_H + PAD + BODY_PX * 0.5
     g.font = `${500} ${BODY_PX}px ${FONT.code}`
     // §2.5 入场"逐行点亮" + 退场整体淡出：整屏 alpha + 逐行 alpha 一起用
     const paneAlpha = paneOpacity()
@@ -253,7 +394,7 @@ export function createTermPane(opts = {}) {
       // 刚点亮的那一行做一个短促的"闪一下"（§2.5 逐行点亮的手感）
       const sinceLit = litRows === Infinity ? 1 : Math.min(1, (litRows - i) / 1.0)
       const rowA = paneAlpha * Math.min(1, 0.35 + 0.65 * sinceLit)
-      let x = 24
+      let x = PAD
       if (st.prefix) {
         const w = text(g, st.prefix, x, y, {
           role: 'term', size: BODY_PX, family: 'code', weight: 600, color: st.prefixColor, align: 'left', baseline: 'middle', alpha: rowA,
@@ -263,13 +404,14 @@ export function createTermPane(opts = {}) {
       text(g, r.text, x, y, {
         role: 'term', size: BODY_PX, family: 'code', weight: 500, color: st.color, align: 'left', baseline: 'middle', alpha: rowA,
       })
-      // 打字光标（只画在最后一行）
+      // 打字光标（只画在最后一行；G1：光标也必须留在窗口的 24px 内边距里）
       if (r.caret && caretOn) {
         const cw = g.measureText(r.text).width
+        const caretW = Math.round(BODY_PX * 0.5)
         g.save()
         g.globalAlpha *= rowA
         g.fillStyle = st.color
-        g.fillRect(x + cw + 4, y - BODY_PX * 0.55, Math.round(BODY_PX * 0.5), Math.round(BODY_PX * 1.05))
+        g.fillRect(Math.min(x + cw + 4, winW - PAD - caretW), y - BODY_PX * 0.55, caretW, Math.round(BODY_PX * 1.05))
         g.restore()
       }
     }
@@ -277,14 +419,15 @@ export function createTermPane(opts = {}) {
     // §2.5：冲击时的切片故障，烘进贴图（再看不出是"贴图重影"而不是两行叠字）
     drawSliceGlitch(g)
 
-    // 描边（§2.2：2px 品牌蓝 α0.5）
+    // 描边（§2.2：2px 品牌蓝 α0.5；G1：描边贴着内容窗口，不是整张画布）
     g.save()
     g.globalAlpha = paneOpacity()
     g.strokeStyle = 'rgba(122,170,255,0.5)'
     g.lineWidth = 2
-    g.strokeRect(1, 1, PANE_W - 2, PANE_H - 2)
+    g.strokeRect(1, 1, winW - 2, winH - 2)
     g.restore()
 
+    endPanel(g)
     tex.needsUpdate = true
     setTextureSpace(prevTS)
     dirty = false
@@ -301,9 +444,9 @@ export function createTermPane(opts = {}) {
     lastKey = key
     if (hdr) title = { session: hdr.session || title.session, subtitle: hdr.subtitle || '' }
 
-    // 实测换行 → 展平成"显示行"
+    // 实测换行 → 展平成"显示行"（预算由窗口宽度反推，保证每行 + 前缀都落在 24px 内边距里）
     g.font = `500 ${BODY_PX}px ${FONT.code}`
-    const maxW = PANE_W - 48 - 150 // 预留前缀宽度
+    const maxW = wrapBudget()
     const flat = []
     for (const L of lines) {
       // 开发字符串守卫：命中就整条丢弃并告警（§2.2 明令不得出现）
@@ -330,8 +473,24 @@ export function createTermPane(opts = {}) {
     material: mat,
     texture: tex,
     canvas: cv,
-    width: worldW,
-    height: worldH,
+    // G1：窗口尺寸随内容变化 → 必须用取值器读实时值（场景/monitor 在任意帧都可能重建外壳）
+    get width() {
+      return worldW
+    },
+    get height() {
+      return worldH
+    },
+    /** 逻辑像素下的窗口尺寸（供 G1 自检与 REVIEW 量化） */
+    get winW() {
+      return winW
+    },
+    get winH() {
+      return winH
+    },
+    /** 窗口尺寸变化回调：monitor 用它重建外壳（G1：窗口放大去适配文字） */
+    set onResize(fn) {
+      onResize = typeof fn === 'function' ? fn : null
+    },
     /** 供遮挡规则与 selftest 读 */
     role: mesh.userData.role,
     side,
@@ -406,8 +565,11 @@ export function createTermPane(opts = {}) {
       drift.x = Math.sin(t * 0.21 + ph) * 0.035 + px * 0.08
       drift.y = Math.cos(t * 0.17 + ph * 1.7) * 0.028 + py * 0.05
       drift.z = Math.sin(t * 0.13 + ph * 0.6) * 0.05
-      drift.rotY = Math.sin(t * 0.19 + ph) * 0.05 + px * 0.10
-      drift.rotX = Math.cos(t * 0.15 + ph * 2.1) * 0.03 + py * 0.06
+      // FIX_V5 §G1：终端/面板「倾斜 ≤6°（0.1047 rad）」。这里给出本屏自带的倾角预算：
+      // rotY ≤ 0.025+0.020 = 0.045 rad(2.58°) / rotX ≤ 0.020+0.015 = 0.035 rad(2.01°)，
+      // 场景基准角另算（各场景已统一压到 ≤0.04 rad）→ 合成倾角 ≤ 0.085 rad = 4.87° < 6°。
+      drift.rotY = Math.sin(t * 0.19 + ph) * 0.025 + px * 0.020
+      drift.rotX = Math.cos(t * 0.15 + ph * 2.1) * 0.020 + py * 0.015
 
       // --- 故障（切片） ---
       const g0 = glitchAmt
@@ -446,18 +608,21 @@ export function createTermPane(opts = {}) {
     get litLineCount() {
       return litRows === Infinity ? rows.length : Math.min(rows.length, litRows)
     },
-    /** 供 selftest r 项：本屏每行文字的包围盒（画布坐标），用于重叠检测 */
+    /** 供 selftest r 项与 G1 自检：本屏每行文字的包围盒（逻辑画布坐标，与 text() 的登记口径一致） */
     bboxes() {
       const out = []
+      g.save()
       g.font = `500 ${BODY_PX}px ${FONT.code}`
-      const y0 = TITLE_H + LINE_H * 0.9
+      const y0 = TITLE_H + PAD + BODY_PX * 0.5
       for (let i = 0; i < rows.length && i < MAX_LINES; i++) {
         const r = rows[i]
         const st = styleOf(r.kind)
         const pw = st.prefix ? g.measureText(st.prefix).width + 12 : 0
         const w = g.measureText(r.text).width + pw
-        out.push({ x: 24, y: y0 + i * LINE_H - BODY_PX * 0.6, w, h: BODY_PX * 1.2, kind: r.kind })
+        // text() 用 baseline:'middle' → 盒顶 = y - 0.5*px，盒高 = px*1.16
+        out.push({ x: PAD, y: y0 + i * LINE_H - BODY_PX * 0.5, w, h: BODY_PX * 1.16, kind: r.kind })
       }
+      g.restore()
       return out
     },
     dispose() {

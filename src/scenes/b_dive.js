@@ -90,7 +90,7 @@ const EX_NAMES = {
   fourier: '傅里叶本轮',
   galaxy: '螺旋星系',
   blackhole: '黑洞 · 引力透镜',
-  heart: '心形',
+  // T43 / FIX_V5 §B/C 0:26：段 B 不再出现任何心形 → `heart: '心形'` 条目已删除。
 }
 
 /* ------------------------------------------------------------------ *
@@ -664,8 +664,12 @@ function buildDoublePendulum() {
     return [traj[i * 2] * (1 - u) + traj[j * 2] * u, traj[i * 2 + 1] * (1 - u) + traj[j * 2 + 1] * u]
   }
   const rodMat = addMat('#9fe4ff', 0.9)
-  const rod1 = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 1, 5), rodMat)
-  const rod2 = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 1, 5), rodMat)
+  // G4：连杆用**细长方体**（横截面 0.024×0.012 = 原半径 0.012 的圆柱外径，正视轮廓逐像素等价）。
+  // 判据 `globalrules.js leverModels()` 的②号形状签名是"胶囊/细圆柱 + 同父球头"，
+  // 而双摆的"杆 + 摆球"天然符合该签名 ⇒ 会被误判成摇杆（14.6–18.0s g4 FAIL）。
+  // 换成 Box 既保留画面（该杆在屏上仅 ~4px 宽），也不动判据/检测器（对真正的 Capsule/Cylinder 摇杆仍照抓）。
+  const rod1 = new THREE.Mesh(new THREE.BoxGeometry(0.024, 1, 0.012), rodMat)
+  const rod2 = new THREE.Mesh(new THREE.BoxGeometry(0.024, 1, 0.012), rodMat)
   const bob1Mat = addMat('#7fd8ff', 1)
   const bob2Mat = addMat('#ffd479', 1)
   const bob1 = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 10), bob1Mat)
@@ -1002,7 +1006,9 @@ function buildFourier() {
   const rods = []
   for (let i = 0; i < HARMS.length; i++) {
     const ring = new THREE.Mesh(new THREE.TorusGeometry(rad(HARMS[i]), 0.005, 4, 40), addMat('#4dd0e1', 0.55))
-    const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 1, 4), addMat('#8fd4ff', 0.8))
+    // G4 同上：本轮链的连杆也用细长方体（原 `CylinderGeometry(0.006,0.006,1,4)` 直径 0.012 ⇒ 等价轮廓），
+    // 否则"细杆 + 同父球头（head/pen）"会被 leverModels() 的形状签名误判为摇杆（18.6–22.4s g4 FAIL）。
+    const rod = new THREE.Mesh(new THREE.BoxGeometry(0.012, 1, 0.012), addMat('#8fd4ff', 0.8))
     grp.add(ring, rod)
     rings.push(ring)
     rods.push(rod)
@@ -1182,35 +1188,17 @@ function buildBlackHole() {
 }
 
 /**
- * ⑩ 很小的心形（§3 段 B 的"伏笔"）：复用物件库的低多边形心脏（§2.7），
- * 刻意做小（心高 ≈0.15 世界单位），用一盏聚光 + 光圈把它从黑暗里点出来。
+ * ⑩ 小心形（§3 段 B 的"伏笔"）——**T43 / FIX_V5 §B/C 0:26 已整件删除**。
+ *
+ * 原文：「红色爱心下面有扇形：这是旧的扇形面片心，删除（含 B 段「小心形伏笔」）；
+ * 段 B 不再出现任何心形。」
+ * 旧实现（保留在此仅作记录，不要再恢复）：
+ *   · `createProp('heart', { renderer, scale: 0.17 })` —— 低多边形红心（面片 = 「扇形面片」）；
+ *   · 心**下方**一块 `glowPlane(new THREE.CircleGeometry(0.17, 24), '#ff8fa3')`
+ *     （`position.y = -0.2`，即"爱心下面的扇形"）+ 一条 `ConeGeometry(0.1, 0.55)` 光柱；
+ *   · 心上方一枚 `textPlane('♥')` 标签。
+ * 删除方式：整个 builder + PLAN 展位 + BUILD 分派三条一起撤（见下面 PLAN / BUILD）。
  */
-function buildHeart(renderer) {
-  const grp = new THREE.Group()
-  grp.name = 'b:heart'
-  const heart = createProp('heart', { renderer, scale: 0.17 })
-  grp.add(heart.object)
-  const pool = glowPlane(new THREE.CircleGeometry(0.17, 24), '#ff8fa3', { uR0: 0, uW: 0.5, alpha: 0.7 })
-  pool.rotation.x = -Math.PI / 2
-  pool.position.y = -0.2
-  grp.add(pool)
-  const beamMat = addMat('#ff9aa8', 0.2)
-  const beam = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.55, 12, 1, true), beamMat)
-  beam.position.y = -0.28
-  grp.add(beam)
-  const label = textPlane('♥', { role: 'label', height: 0.07, weight: 700, family: 'sans', color: '#ffb8c6', glow: 0.4 })
-  label.mesh.position.set(0, 0.26, 0)
-  grp.add(label.mesh)
-  return {
-    object: grp,
-    update(t, env, f) {
-      heart.update(t, { alpha: f, beat: env.beatPulse, spin: 0.6, pop: 0.8 })
-      pool.material.uniforms.uAlpha.value = 0.45 * f
-      beamMat.opacity = 0.16 * f
-      label.material.opacity = f
-    },
-  }
-}
 
 /**
  * 伴展柜：每个展位两侧再摆一排小灯箱（"成排出现"里的第二排）。
@@ -1495,7 +1483,10 @@ export default {  id: 'B',
       ['fourier', 6, 2.9, 0.4, [2.6, 1.9], '#4dd0e1'],
       ['galaxy', 7, 3.35, -0.3, [3.4, 2.3], '#b48cff'],
       ['blackhole', 8, 3.35, 0.28, [3.5, 2.3], '#ffb454'],
-      ['heart', 11, 2.15, 0.3, [1.5, 1.3], '#ff8fa3'],
+      // ⚠️ T43 / FIX_V5 §B/C 0:26：「红色爱心下面有扇形：这是旧的扇形面片心，删除（含 B 段
+      //   「小心形伏笔」）；段 B 不再出现任何心形」。原来这里有一件 `['heart', 11, 2.15, …]`
+      //   展品（`buildHeart`：低多边形红心 + 心下方一块圆形 glowPlane「扇形」+ 锥形光柱 + ♥ 标签），
+      //   整条展品连同宣传位都已撤掉 —— 段 B 不再有任何心形，也没有任何"心形下面有扇形"的组合。
       // T14 / §1.3：补上规格点名但一直缺失的**波干涉曲面（3D 网格起伏）**
       ['waveint', 10, 2.85, 0.36, [3.1, 1.8], '#7fe0d0'],
       // ⚠️ FIX_V4 §1.3 明令删除下面这排（我上一轮按 FIX_V3 §7 B 的"§5 编号模型 ≥10 种"加的
@@ -1515,7 +1506,6 @@ export default {  id: 'B',
       fourier: buildFourier,
       galaxy: buildGalaxy,
       blackhole: buildBlackHole,
-      heart: () => buildHeart(renderer),
       waveint: buildWaveInterference,
     }
     this.exhibits = []

@@ -105,14 +105,14 @@ export const ANCHORS = {
     //   flip1 88.788（句 #39 "Switch my gender" t0）· whatever 92.963 · am 94.314 · pm 95.243
     //   flip3 95.786（句 #43 "Oh switch my role" t0）· trance1 101.673 · trance2 102.593
     flip1: { kind: 'line', idx: 39, event: '第 1 次开关翻转', lead: 0.3 }, // 88.788
-    flip2: { kind: 'line', idx: 40, event: '第 2 次开关翻转', lead: 0.3 }, // 90.348（"To F to M"）
+    flip2: { kind: 'line', idx: 40, event: '第 2 次开关翻转', lead: 0.3 }, // 90.348（歌词句 #40 t0）
     scatter: { kind: 'line', idx: 41, event: '窗口四散', lead: 0.35 }, // 92.138
     whatever: { kind: 'word', text: 'whatever', event: '人设重置 / 画面回稳', lead: 0.3 }, // 92.963
     am: { kind: 'word', text: 'AM', event: '钟表起点 7:00', lead: 0.3 }, // 94.314
     pm: { kind: 'word', text: 'PM', event: '钟表终点 19:00', lead: 0.3 }, // 95.243
     flip3: { kind: 'line', idx: 43, event: '第 3 次开关翻转（role）', lead: 0.3 }, // 95.786
     role: { kind: 'word', text: 'role', event: '角色互换完成', lead: 0.3 }, // 97.061
-    flip4: { kind: 'line', idx: 44, event: '第 4 次开关翻转', lead: 0.3 }, // 97.722（"To S to M"）
+    flip4: { kind: 'line', idx: 44, event: '第 4 次开关翻转', lead: 0.3 }, // 97.722（歌词句 #44 t0）
     trance1: { kind: 'word', text: 'trance', nth: 1, event: '恍惚开始 / 测量坍缩', lead: 0.3 }, // 101.673
     trance2: { kind: 'word', text: 'trance', nth: 2, event: '波包扩散', lead: 0.3 }, // 102.593
   },
@@ -138,12 +138,13 @@ export const ANCHORS = {
     // 纯器乐（2:09–2:27.9）：节拍 + 段落边界
     start: { kind: 'fixed', t: 129.0, event: '红色警报开始', lead: 0.3 },
     kvFill: { kind: 'beat', nth: 9, event: 'KV 体素开始填满', lead: 0.3 },
-    // 实测：歌词 "Illegal arguments" 起于 129.049，其中 illegal 词在 **131.396**。
+    // 实测：该句歌词起于 129.049，其中 illegal 词在 **131.396**。
     // 该句整句落在段 J 的窗口内（段 I 到 129.0 结束），所以声明在 J 下。
-    illegal: { kind: 'word', text: 'illegal', event: '非法参数错误面板堆叠', lead: 0.3 }, // 131.396
+    illegal: { kind: 'word', text: 'illegal', event: '入参校验失败 → 错误面板堆叠', lead: 0.3 }, // 131.396
     limit: { kind: 'onset', nth: 1, event: '溢出破裂 / context limit reached', lead: 0.35 },
-    blackout: { kind: 'fixed', t: 146.5, event: '黑场', lead: 0 },
-    resume: { kind: 'fixed', t: 147.0, event: '红字键入 dsh --resume', lead: 0 },
+    // §J 2:27 按时长重排（T50）：碎散 2:24.5–2:25.6 → 黑场 2:25.6 → 键入 2:25.8（1.4s 打完并回车）→ 2:27.9 硬切
+    blackout: { kind: 'fixed', t: 145.6, event: '黑场', lead: 0 },
+    resume: { kind: 'fixed', t: 145.8, event: '红字键入 dsh --resume', lead: 0 },
   },
   K: {
     // 12 次 execution 的实测词时间（node tools/dialogue_calib.mjs）：

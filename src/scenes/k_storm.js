@@ -1113,12 +1113,30 @@ function drawTidalFormulas(g, ctx, t, heat, suppress = 0, win = 0) {
   const R = W * 0.20
   const N = ORBIT_FORMULAS.length
   const spin = t * 0.42
+  // T51 / G5：轨道顶端/底端的公式盒会越出 8%/80%（实测 151.8s `"0"` top 1.0%）。
+  // 把**整条公式的保守外接 AABB** 夹进安全区 —— 单字盒比整条窄，所以这是充分条件。
+  const safeL = W * 0.05
+  const safeR = W * 0.95
+  const safeT = H * 0.08
+  const safeB = H * 0.80
+  g.font = MONO(68, 500)
   for (let i = 0; i < N; i++) {
     const ang = spin + (i / N) * TAU
     const r = R * (1 + 0.05 * Math.sin(t * 0.9 + i))
-    const x = cx + Math.cos(ang) * r
-    const y = cy + Math.sin(ang) * r * 0.86
+    let x = cx + Math.cos(ang) * r
+    let y = cy + Math.sin(ang) * r * 0.86
     const phase = (i / N + t * 0.1) % 1
+    // 旋转 + 潮汐缩放后的外接半宽/半高（`font` 用 MONO 栈量，再乘 1.35 兜住
+    // formula.js 的 Cambria Math 回退差异 —— 宁可估大）
+    const tw = g.measureText(ORBIT_FORMULAS[i]).width * 1.35 + 24
+    const hw = (tw / 2) * (1 + 0.2 * phase)
+    const hh = 68 * 0.58 * 0.86
+    const ca = Math.abs(Math.cos(ang))
+    const sa = Math.abs(Math.sin(ang))
+    const extX = hw * ca + hh * sa
+    const extY = hw * sa + hh * ca
+    x = clamp(x, safeL + extX + 2, safeR - extX - 2)
+    y = clamp(y, safeT + extY + 2, safeB - extY - 2)
     g.save()
     g.globalAlpha = win * clamp(0.4 + 0.6 * (1 - Math.abs(phase - 0.5) * 2)) * (0.75 + 0.25 * heat)
     g.translate(x, y)
@@ -1146,7 +1164,7 @@ function drawTidalFormulas(g, ctx, t, heat, suppress = 0, win = 0) {
  * 改它会波及别处；而 §1.10 只要求段 K 的卡"别小到看不清"。
  * 一行放不下时按实测宽度截断加 `…`，保证不会溢出到中间（黑洞/歌词所在）。
  */
-function drawToolCardLg(g, { x, y, w, px, name, ok, accent }) {
+function drawToolCardLg(g, { x, y, w, px, name, ok, accent, labelA = 1 }) {
   const h = px * 1.45
   roundRect(g, x, y, w, h, 8)
   g.fillStyle = 'rgba(10,14,20,0.55)'
@@ -1165,7 +1183,13 @@ function drawToolCardLg(g, { x, y, w, px, name, ok, accent }) {
   let str = label
   const maxW = w - 28
   while (str.length > 4 && g.measureText(str).width > maxW) str = str.slice(0, -2) + '…'
-  g.fillText(str, x + 16, y + h / 2)
+  // T51 / G5：卡片飞入途中标签盒还在 5% 安全区外，此时必须**不登记**包围盒。
+  // `text.js` 的登记门槛是 `globalAlpha > 0.04`，所以这里用 labelA 把标签淡入
+  // （调用方保证 alpha 跨过 0.04 时盒左缘已在安全区内）。
+  const prevA = g.globalAlpha
+  g.globalAlpha = prevA * clamp(labelA)
+  if (g.globalAlpha > 0.04) g.fillText(str, x + 16, y + h / 2)
+  g.globalAlpha = prevA
 }
 
 function drawToolCards(g, ctx, t, execs, heat) {
@@ -1183,10 +1207,14 @@ function drawToolCards(g, ctx, t, execs, heat) {
   // `tool: run_test` 就是 13px。那个组件是全片 dsh 界面共用的，直接改它会影响别处，
   // 所以这里按 §1.10 自己画 34px 的单行卡片（只影响段 K）。
   const TOOL_PX = 34
-  const targetX = 20
+  // T51 / G5（FIX_V5 §0：舞台文字 x∈[5%,95%]）：旧 `targetX = 20` 让整列标签的左缘停在
+  // x≈36px（1.9%）——全片 gscan 的 1136 帧次越界里大半是它。列左缘改到 7% 画面宽：
+  // 标签左缘 = 0.07W+16 = 150px、右缘 ≤ 0.07W+396 = 530px，都稳稳落在安全区内。
+  const targetX = Math.round(W * 0.07)
   const cardW = 396
   const slotH = 56
   const yTop = H * 0.10
+  const safeL = W * 0.05
   g.save()
   for (let i = 0; i < execs.length; i++) {
     const t0 = execs[i]
@@ -1201,7 +1229,11 @@ function drawToolCards(g, ctx, t, execs, heat) {
     const jolt = after > 0 && after < 0.25 ? (1 - after / 0.25) * 26 : 0
     g.globalAlpha = clamp(fade) * (1 - yieldToCards)
     g.save()
-    g.translate(sx + (hash01(i, 121) * 2 - 1) * jolt, sy + (hash01(i, 122) * 2 - 1) * jolt)
+    // 抖动只作用在 y：x 方向抖动会把标签盒推出 5% 安全区（G5）
+    g.translate(sx, sy + (hash01(i, 122) * 2 - 1) * jolt)
+    // 标签淡入包络：盒左缘 = sx+16，取 (安全区左缘 + 8px) 起淡入、18px 内到 1
+    // ⇒ alpha 越过 0.04（登记门槛）时盒左缘 ≈ 105px > 96px。静止位 sx = 0.07W = 134 → 恒为 1。
+    const labelA = clamp((sx + 16 - (safeL + 8)) / 18)
     drawToolCardLg(g, {
       x: 0,
       y: 0,
@@ -1210,6 +1242,7 @@ function drawToolCards(g, ctx, t, execs, heat) {
       name: TOOL_NAMES[i % TOOL_NAMES.length],
       ok: after > 0,
       accent: C.cyan,
+      labelA,
     })
     // 命中火花
     if (after >= 0 && after < 0.3) {
@@ -1271,10 +1304,13 @@ function drawNumeralFlips(g, ctx, t, counts) {
 
   // ---- 2) 版式：每张 ≥14% 画面宽 ----
   const N = COUNT_LANGS.length
-  const gap = W * 0.028
-  const cw = (W - gap * (N - 1)) / N // = 275.2 @1920 → 14.3%
+  // T51 / G5：整排必须落在 5%–95% 安全区内。旧版 `x0` 居中算出 ≈ -0.1 ⇒ 首卡贴左缘
+  // （实测 `DE` 左越界 3.1%）、末卡右缘 = 1920（实测 `六` 右越界 1.0%）。
+  // 现在：卡宽取 §1.11 的下限 14% 画面宽，左边距 5%，余下的 0.90W 均分成卡间距。
+  const cw = W * 0.14
+  const gap = (W * 0.90 - cw * N) / (N - 1)
   const ch = 190
-  const x0 = (W - (cw * N + gap * (N - 1))) / 2
+  const x0 = W * 0.05
   const y = H * 0.60
   const COLORS = ['#7fd8ff', '#ffd479', '#a5e075', '#ff8fa3', '#c792aa', '#4dd0e1']
   const revealedN = counts.filter((c) => t >= c).length

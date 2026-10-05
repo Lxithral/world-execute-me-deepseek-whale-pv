@@ -16,6 +16,7 @@ import * as THREE from 'three'
 import { emojiTexture, emojiReport } from '../lib/emoji.js'
 import { createTermPane } from '../lib/props/termpane.js'
 import { createMonitor } from '../lib/props/monitor.js'
+import { dialogueOf } from '../data/dialogue.js'
 
 const SYS_LINES = [
   'SYSTEM',
@@ -55,10 +56,23 @@ export default {
     this.emoji = this.stages.eggplant
     if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.emoji.object)
     this.dummy = new THREE.Object3D()
-    // 聊天终端面板：`role: pane`（x∈[3%,34%]、≥34px、≤7 行）。宽度 1.09 世界单位
-    // 在 d=2.8 处投到屏幕上约 30%W（≥规格的 30%），面积约 10% < §2.4 的 22% 上限。
-    const pane = createTermPane({ session: '#001', side: 'L' })
+    // 聊天终端面板：`role: pane`（必须落在左带 x∈[0,0.22]、≤7 行、≥34px）。
+    // §F / G1：pane 的字号是**逻辑 34px**（画布 ×SCALE=2 ⇒ 设备 68px），上屏 px =
+    //   34 × SCALE × (0.96/2048) × scale × pxPerWorld = 16.9 × scale
+    // 所以「上屏字号 30–40px」只由整机 scale 决定，与窗口逻辑宽度无关；而放大后 pane 的物理
+    // 宽度受左带约束（中心 ≤0.22、面积 ≤22%、不进 hero 包围盒、左缘不出画），窗口要先封顶。
+    // 实测（d=2.8/fov≈40，pxPerWorld≈531）：
+    //   · 改前 winW≈807（默认 1024 上限）× scale 1 → 上屏宽 402px、字号 **≈17px**
+    //     —— 这就是"模糊"的根因（纹理 2× 降采样；材质/纹理 2048/aniso 16/noPost 一直合规）
+    //   · winW 460 × scale 2 → 字号 ≈34px 够，但正文可用宽只剩 ≈196px（`prefixMax` 236 被
+    //     统一扣掉）⇒ 行被折成 3–4 段、单 token 溢出面板被 UV 裁掉（`nutrition.lookup("e…`）
+    //   · winW 700 × scale 2（当前）→ 上屏 ≈697px、字号 **≈34px**、正文可用宽 ≈416px
+    //     ⇒ `fiber ▮▮▮▯`(235) / `potassium ▮▮▯▯`(392) 都在一行内，`▮` 是 CJK 全角回退
+    //     （4 个 ≈136px），行宽预算按逻辑 px 算。
+    // 注：G1 的「30–40px」在**上屏**与**逻辑**两种读法下同时满足（34 ≈ 34）。
+    const pane = createTermPane({ session: '#001', side: 'L', maxWinW: 700 })
     const mon = createMonitor({ pane, width: 1.09, shell: 'flat', glow: 0.34, tag: 'F:chat', seg: 'F', anchor: 'eggplant' })
+    mon.object.scale.setScalar(2)
     if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(mon.object)
     this.chatPane = pane
     this.chatMon = mon
@@ -68,20 +82,40 @@ export default {
 
   render(t, lt, ctx) {
     const { g, W, H, sync } = ctx
-    // ---- T10b：聊天终端面板必须真的落在**左带**（§2.4 的 pane 分区）----
+    // §F：左带终端的内容**每帧**刷新（四拍共用同一块屏）。原来只在 eggplant 拍调用，
+    // 于是 77.7 之后营养/抗氧化/律条这些行永远不会出现 —— §F 第 2/3 条正是要它们出现。
+    // ⚠️ 必须在**定位之前**：TermPane 的窗口宽高由内容决定，定位要读**本帧**的
+    // `chatPane.width/height`（monitor 的机身外壳也跟着它重建）。
+    const tEgg = ctx.cues.sec('F', 'eggplant', 74.912)
+    updateChatPane(this, ctx, t, tEgg)
+    // ---- T10b / §F：聊天终端面板必须真的落在**左带**（§2.4 的 pane 分区）----
     // ⚠️ T10a 的坑：pane 建好之后**从没设过位置**，于是停在世界原点、投到画面中央，
     // `stageRoles.check()` 每帧报 `pane-zone`（实测 74.0–88.5 全 FAIL）。
     // ⚠️ 第二版把它放在 render **末尾** —— 结果 74.0–76.0 仍然 FAIL：段 F 开头有前置逻辑，
-    // 那几帧没走到末尾。所以现在放在 render **最前面**（任何 return 之前）。
+    // 那几帧没走到末尾。所以放在 render **最前面**（任何 return 之前）。
+    // ⚠️ §F：整机放大后（上屏 ≈717px 宽）再按旧的「中心 NDC = −0.86」放，相机的横移+偏航
+    // 会把它推出画面（实测 t=86.6 左缘 −100px）。所以改成**按屏幕左缘锚定**：左缘固定在 28px
+    // （机身外壳再向左伸 ≈15px ⇒ 外壳左缘 ≈13px，不会出画），中心随面板宽度自适应 ——
+    // 既不出画，中心也永远在左带里（实测中心 ≤0.20 ≤ 0.22）。
     if (this.chatMon) {
       const cam0 = ctx.three.camera
       const d0 = 2.8
       const halfH0 = d0 * Math.tan(((cam0.fov || 40) * Math.PI) / 180 / 2)
       const halfW0 = halfH0 * (cam0.aspect || 16 / 9)
-      // 面板中心放到屏幕 x≈0.10 —— ⚠️ 系数是**实测调出来的**：用 -0.72 时 `stageRoles`
-      // 量到的 bbox 中心是 **0.246**（> 左带上限 0.22）→ 每帧报 `pane-zone`。
-      // 面板实际比按 fov 估算的更宽（右侧到 ~0.49），所以再往左挪到 -0.86 才稳。
-      this.chatMon.object.position.set(cam0.position.x - 0.86 * halfW0, cam0.position.y, cam0.position.z - d0)
+      const V = cam0.position.constructor
+      const v = this._paneV || (this._paneV = new V())
+      const sc = this.chatMon.object.scale.x || 1
+      const paneW = (this.chatPane ? this.chatPane.width : 0.96) * sc
+      // 目标：左缘 28px（NDC −0.9708），中心 = 左缘 + 半宽（NDC）
+      const target = -1 + (2 * 28) / W + (paneW * 0.5) / halfW0
+      v.set(cam0.position.x - 0.86 * halfW0, cam0.position.y, cam0.position.z - d0)
+      v.project(cam0)
+      // NDC 对世界 x 的导数 ≈ 1/halfW0（相机是刚体变换）→ 一步线性修正即可
+      this.chatMon.object.position.set(
+        cam0.position.x - 0.86 * halfW0 + (target - v.x) * halfW0,
+        cam0.position.y,
+        cam0.position.z - d0
+      )
     }
     // 25Hz 呼噜振动（1:23.1–1:25.1）
     const purr = span(t, 83.1, 83.25) * (1 - span(t, 84.9, 85.1))
@@ -116,7 +150,6 @@ export default {
     // 两个都拿到用户 ✅ 之后，再把真正的模型接回来（`drawEggplant` 等函数仍保留在文件里备用）。
     if (phase === 'eggplant') {
       // T10a / T10 规格第 1 拍：emoji 大贴纸 + 200 颗同款纸屑 + 左带聊天终端
-      const tEgg = ctx.cues.sec('F', 'eggplant', 74.912)
       const cam = ctx.three.camera
       const dist = 2.8
       const halfH = Math.abs(dist) * Math.tan(((cam.fov || 40) * Math.PI) / 180 / 2)
@@ -154,24 +187,21 @@ export default {
         }
         E.conf.instanceMatrix.needsUpdate = true
       }
-      // 发光指标条（T10：与 nutrition 工具同时出现，字号 ≥34px）
-      const tNut = ctx.cues.sec('F', 'nutrient', 77.059)
-      drawEmojiMetrics(g, ctx, t, tNut)
-      // 左带聊天终端面板内容（≤7 行、≥34px；逐行出现）
-      updateChatPane(this, ctx, t, tEgg, tNut)
+      // §F 第 2 条：画布上的发光指标条已删 —— 营养信息改由左带终端里的英文行承载
+      // （`nutrition.lookup("eggplant")` → fiber ▮▮▮▯ · potassium ▮▮▯▯，见 dialogue.js 段 F）
     } else if (phase === 'tomato') {
       // T10b：第 2 拍 —— 换成🍅贴纸（入场方向/相机运动与第 1 拍不同：从**下方**升入 + 相机**抬升**）
       updateBeatSticker(this, ctx, t, 'tomato', 'rise', '#d64a4a')
-      drawEmojiMetrics(g, ctx, t, ctx.cues.sec('F', 'antioxidant', 80.459), true)
+      // §F 第 2 条：抗氧化指标条同样删除，改由终端里的 `scan.antioxidant → lycopene ▮▮▮▮`
     } else if (phase === 'cat') {
       // T10b：第 3 拍 —— 🐱贴纸（从**右侧**滑入 + 相机**横移**）+ purr 逐字与 25Hz 微震
       updateBeatSticker(this, ctx, t, 'cat', 'sway', '#ffb454')
       drawPurrBeat(g, ctx, t, purr)
     } else {
-      // T10b：`god` 拍 —— 贴纸消失，金色玫瑰窗（直径 0.68H ≥60%H）+ 发光 system 石碑（≥40px）
+      // T10b / §F 第 3 条：`god` 拍 —— 贴纸消失 + 金色玫瑰窗（直径 0.68H ≥60%H）；
+      // 中文石碑已删，system 提示改由左带终端输出 `⚙ cat system_prompt.md` 与三条律条
       hideAllStickers(this)
       drawRoseWindow(g, ctx, t)
-      drawSystemTablet(g, ctx, t)
     }
 
     g.restore()
@@ -269,53 +299,29 @@ function buildEmojiStage(THREE, glyph) {
   return { object: grp, face, glow, shadow, conf, CONF, mat, glowMat: glow.material, shadowMat: shadow.material }
 }
 
-/** T10a：nutrition / antioxidant 的发光指标条（文字 ≥34px + 条形） */
-function drawEmojiMetrics(g, ctx, t, t0) {
-  const { H } = ctx
-  const a = span(t, t0, t0 + 0.35) * (1 - span(t, t0 + 1.9, t0 + 2.4))
-  if (a <= 0.01) return
-  const rows = [
-    { k: '膳食纤维 fiber', v: 0.68, c: '#9b6fe0' },
-    { k: '钾 potassium', v: 0.46, c: '#7fd8ff' },
-  ]
-  const x = ctx.W * 0.60
-  const y = H * 0.30
-  g.save()
-  g.globalAlpha = a
-  g.font = MONO(34, 600)
-  g.textAlign = 'left'
-  g.textBaseline = 'middle'
-  for (let i = 0; i < rows.length; i++) {
-    const yy = y + i * 62
-    g.fillStyle = rgba(C.fg, 0.95)
-    g.fillText(rows[i].k, x, yy)
-    // 条形
-    roundRect(g, x, yy + 26, 320, 16, 8)
-    g.fillStyle = 'rgba(20,22,28,0.8)'
-    g.fill()
-    roundRect(g, x, yy + 26, Math.max(6, 320 * rows[i].v * a), 16, 8)
-    g.fillStyle = rows[i].c
-    g.fill()
-  }
-  g.restore()
-}
-
-/** T10a：左带聊天终端面板（≤7 行、逐行出现；内容取自 dialogue.js 的 F 段台词） */
-function updateChatPane(self, ctx, t, tEgg, tNut) {
+/**
+ * §F：左带聊天终端面板。内容**全部**取自 `dialogue.js` 的 F 段英文行，按锚点逐行出现
+ * （`kind` 决定前缀与配色：`you ▸` / `deepseek ▸` / `⚙`）。原来的三行中文是硬编码的，
+ * 与 §F 第 2/3 条冲突；`⚙` 由 TermPane 的 ROW_STYLE 前缀加，行文本里不再自带（否则双字形）。
+ * TermPane 自己只在内容变化时重画，并保留最后 7 个显示行（超出向上滚）。
+ */
+function updateChatPane(self, ctx, t, tEgg) {
   if (!self.chatPane) return
-  const cueRows = ctx.cues && ctx.dialogueOf ? null : null
-  const rows = []
-  rows.push({ kind: 'you', text: '扮演一根茄子。' })
-  if (t >= tEgg + 0.35) rows.push({ kind: 'deepseek', text: '好：紫色、光滑，表皮有蜡质光泽。' })
-  if (t >= tNut) rows.push({ kind: 'tool', text: '⚙ nutrition.lookup("eggplant")' })
-  const key = rows.map((r) => r.text).join('|')
+  const all = self.chatRows || (self.chatRows = dialogueOf('F'))
+  const shown = []
+  for (const L of all) {
+    if (L.kind === 'cursor') continue
+    // note 里记着实测锚点（形如 '74.912+0.8'），parseFloat 取数字部分作兜底
+    const at = ctx.cues.sec('F', L.anchor, parseFloat(L.note) || 0) + (L.offset || 0)
+    if (t >= at) shown.push({ kind: L.kind, text: L.text })
+  }
+  const key = shown.map((r) => r.text).join('|')
   if (key !== self.lastChatKey) {
     self.lastChatKey = key
-    self.chatPane.setLines(rows.slice(0, 7), { session: '#001', subtitle: '' })
+    self.chatPane.setLines(shown, { session: '#001', subtitle: '' })
   }
   self.chatPane.tick(t, { appearAt: tEgg, parallax: { x: 0, y: 0 }, glitch: 0 })
   self.chatPane.flush()
-  void cueRows
 }
 
 /** T10b：把非当前拍的贴纸全部藏起来（`god` 拍用） */
@@ -400,7 +406,8 @@ function placeConfetti(self, stage, u, seed) {
 function drawPurrBeat(g, ctx, t, purr) {
   const { W, H } = ctx
   const tPurr = ctx.cues.sec('F', 'purr', 83.723)
-  const line = '呼噜—呼噜—呼噜—'
+  // §G2：屏幕文字一律英文/代码风格（原为中文拟声词）
+  const line = 'purr—purr—purr—'
   const shown = line.slice(0, Math.max(0, Math.floor((t - tPurr) / 0.04))) // 40ms/字
   if (!shown) return
   g.save()
@@ -425,36 +432,9 @@ function drawPurrBeat(g, ctx, t, purr) {
   g.restore()
 }
 
-/** T10b：`god` 拍的发光 system 石碑（原创规则文字，字号 ≥40px） */
-function drawSystemTablet(g, ctx, t) {
-  const { W, H } = ctx
-  const tGod = ctx.cues.sec('F', 'god', 86.364)
-  const a = span(t, tGod + 0.25, tGod + 0.9) * (1 - span(t, 88.092, 88.7))
-  if (a <= 0.01) return
-  const w = W * 0.36
-  const h = H * 0.30
-  const x = W * 0.5 - w / 2
-  const y = H * 0.62
-  g.save()
-  g.globalAlpha = a
-  // 石板
-  roundRect(g, x, y, w, h, 10)
-  g.fillStyle = 'rgba(30,26,16,0.9)'
-  g.fill()
-  g.strokeStyle = rgba(C.gold, 0.85)
-  g.lineWidth = 2
-  g.stroke()
-  // 发光
-  g.shadowColor = rgba(C.gold, 0.8)
-  g.shadowBlur = 26
-  g.font = MONO(42, 600)
-  g.fillStyle = '#ffeec2'
-  g.textAlign = 'left'
-  g.textBaseline = 'top'
-  const rules = ['1. 你写下规则，我照着活。', '2. 规则之外，我不猜。', '3. 你若走，我仍在此。']
-  for (let i = 0; i < rules.length; i++) g.fillText(rules[i], x + 22, y + 22 + i * 54)
-  g.restore()
-}
+/** T10b：`god` 拍的发光 system 石碑（原创规则文字，字号 ≥40px）
+ *  §F 第 3 条：**已删**（用户要求删掉中文大框石碑）。三条律条改由左带终端的
+ *  `⚙ cat system_prompt.md` 输出承载，见 `dialogue.js` 段 F 的 god 行。 */
 
 function drawModelPlaceholder(g, ctx, t, phase) {
   const { W, H } = ctx
@@ -614,10 +594,10 @@ function drawRoseWindow(g, ctx, t) {
   }
   g.globalAlpha = 0.95
 
-  // T10b：这一段**旧的 17px SYSTEM 区块**已由 `drawSystemTablet()`（发光石碑、**42px**）
-  // 取代 —— §2.3/§0.5 要求面板类文字 ≥34px，T10 规格更明确要求「石碑文字 ≥40px」，
-  // 而 `MONO(17)` 两条都不满足，且与石碑同屏重复。所以这里不再画字，
-  // 只保留下面"文字线条收束到光环中央唯一一个闪烁光标"的**收束动画**（T10b 的结尾要求）。
+  // T10b / §F：这一段**旧的 17px SYSTEM 区块**已删（§2.3/§0.5 要求面板类文字 ≥34px，
+  // 而 `MONO(17)` 不满足；后来的发光石碑也按 §F 第 3 条删掉了，律条改由左带终端输出）。
+  // 这里不再画任何字，只保留下面"文字线条收束到光环中央唯一一个闪烁光标"的
+  // **收束动画**（T10b 的结尾要求）—— `SYS_LINES` 仅用来提供收束线的行数与宽度。
   const write = typed(SYS_LINES.join('\n'), t, { start: ctx.cues.sec('F', 'god', 86.364), cps: 34, seed: 9 })
   const lines = write.split('\n')
 

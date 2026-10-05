@@ -11,6 +11,14 @@ export const LOGICAL_W = 1920
 export const LOGICAL_H = 1080
 export const ASPECT = LOGICAL_W / LOGICAL_H
 
+/**
+ * FIX_V5 §G1：终端/面板（`userData.noPost`）不参与 bloom / 径向模糊 / tone mapping，
+ * 否则屏上 34px 的文字会被泛光糊掉、被径向模糊拖成拖影。
+ * 做法：把它们单独放到 **layer 3**，主 pass（相机只看 layer 1/2）看不见它们，
+ * 后处理结束后再用同一台相机只画 layer 3 → 面板是"后处理之上的 HUD"，逐像素保真。
+ */
+export const PANEL_LAYER = 3
+
 function mkCanvas(w, h) {
   const c = document.createElement('canvas')
   c.width = w
@@ -19,8 +27,17 @@ function mkCanvas(w, h) {
 }
 
 export class Compositor {
-  constructor(viewCanvas, lyricsCanvas = null) {
+  /**
+   * @param {HTMLCanvasElement} viewCanvas 主画布（#stage）
+   * @param {HTMLCanvasElement|null} lyricsCanvas 顶层歌词画布（#lyrics）
+   * @param {{dpr?: number}} [opts] T40（FIX_V5 §1）：`?export=1` 需要 **DPR 固定 1.0**，
+   *   否则同一时刻在不同机器上导出的像素尺寸不同（2× 屏会变成 3840×2160）。给一个显式覆盖值，
+   *   缺省仍是「devicePixelRatio 上限 2」——即非导出路径的行为完全不变。
+   */
+  constructor(viewCanvas, lyricsCanvas = null, opts = {}) {
     this.view = viewCanvas
+    /** T40：DPR 覆盖值（null = 跟随 devicePixelRatio，≤2） */
+    this.dprFixed = Number.isFinite(opts.dpr) && opts.dpr > 0 ? opts.dpr : null
     // 歌词层画布：独立于合成链之外，永远最后画、且在所有 DOM 层之上（FIX §6 + 用户 F2a 反馈）
     this.lyricsCanvas = lyricsCanvas || document.getElementById('lyrics')
     if (!this.lyricsCanvas) {
@@ -30,37 +47,52 @@ export class Compositor {
     }
     this.W = LOGICAL_W
     this.H = LOGICAL_H
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2)
+    this.dpr = this.dprFixed || Math.min(window.devicePixelRatio || 1, 2)
+    /**
+     * T55 / 4K 交付：**内部渲染倍率**（不是显示 DPR）。
+     * 1 = 逻辑 1920×1080，交互路径的默认值，行为与加这个参数之前逐像素一致；
+     * `?export=1&res=2` → 所有内部缓冲与 WebGL 缓冲都是 3840×2160 的原生渲染，
+     * 而**布局仍按逻辑 1920×1080 坐标绘制**（每个 2D 上下文统一 `setTransform(res,…)`）。
+     * 之所以不靠 `--window-size=3840,2160`：那会把逻辑尺寸一起改掉，全片布局全变。
+     */
+    this.res = Number.isFinite(opts.res) && opts.res > 0 ? Math.min(2, opts.res) : 1
+    const RS = this.res
+    const DW = Math.round(this.W * RS)
+    const DH = Math.round(this.H * RS)
+    /** 内部缓冲的像素尺寸（res=1 时就是 1920×1080） */
+    this.pxW = DW
+    this.pxH = DH
 
     this.layers = {}
     for (const name of ['stageBack', 'stageFront', 'whale', 'ui']) {
-      const canvas = mkCanvas(this.W, this.H)
+      const canvas = mkCanvas(DW, DH)
       this.layers[name] = { canvas, g: canvas.getContext('2d') }
     }
-    this.comp = mkCanvas(this.W, this.H)
+    this.comp = mkCanvas(DW, DH)
     this.gComp = this.comp.getContext('2d')
-    this.post = mkCanvas(this.W, this.H)
+    this.post = mkCanvas(DW, DH)
     this.gPost = this.post.getContext('2d')
 
-    // 半分辨率辅助缓冲（色散 / 泛光）
+    // 半分辨率辅助缓冲（色散 / 泛光）；halfW/halfH 仍是**逻辑**半分辨率
     this.halfW = this.W >> 1
     this.halfH = this.H >> 1
-    this.scratchA = mkCanvas(this.halfW, this.halfH)
+    this.scratchA = mkCanvas(Math.round(this.halfW * RS), Math.round(this.halfH * RS))
     this.gA = this.scratchA.getContext('2d')
-    this.scratchB = mkCanvas(this.halfW, this.halfH)
+    this.scratchB = mkCanvas(Math.round(this.halfW * RS), Math.round(this.halfH * RS))
     this.gB = this.scratchB.getContext('2d')
-    this.bloom = mkCanvas(this.W >> 2, this.H >> 2)
+    this.bloom = mkCanvas(Math.round((this.W >> 2) * RS), Math.round((this.H >> 2) * RS))
     this.gBloom = this.bloom.getContext('2d')
 
     // Three
-    const threeCanvas = mkCanvas(this.W, this.H)
+    const threeCanvas = mkCanvas(DW, DH)
     this.threeCanvas = threeCanvas
     // ---- T01（FIX_V4 §2.5e）：`preserveDrawingBuffer` **只在 ?selftest / ?contact 时开** ----
     // 它的作用是让"渲染完再读回像素"变得确定（合成层要把 WebGL 画布 drawImage 进 2D 层，
     // 自检/联系表还要再读一次）。但常开会让浏览器每帧多留一份后备缓冲、并且禁止某些快速路径，
     // 是明确的耗电项。所以只在需要读回的两个模式里开；其它情况交给默认（false）。
+    // T40（FIX_V5 §1 明写）：`?export=1` 同样要读回，加入同一张白名单。
     const q = new URLSearchParams(window.location.search)
-    const wantsReadback = q.has('selftest') || q.has('contact')
+    const wantsReadback = q.has('selftest') || q.has('contact') || q.has('export')
     this.renderer = new THREE.WebGLRenderer({
       canvas: threeCanvas,
       alpha: true,
@@ -73,7 +105,8 @@ export class Compositor {
     this.dprScale = 1
     /** T01：`?fps=30` 等帧率上限由 main.js 控制，这里只记录，便于 ?perf 报告 */
     this.preserveDrawingBuffer = wantsReadback
-    this.renderer.setPixelRatio(1)
+    // T55：`setPixelRatio(res)` + `setSize(W,H)` ⇒ 绘制缓冲 = 1920·res × 1080·res（res=1 时与旧行为一致）
+    this.renderer.setPixelRatio(RS)
     this.renderer.setSize(this.W, this.H, false)
     // 3D 现在是**底层**：清屏色必须不透明（背景由 3D 场景/清屏色提供）
     this.renderer.setClearColor(0x0b0d12, 1)
@@ -102,11 +135,11 @@ export class Compositor {
     this.whale3d.renderOrder = 20
     this.scene.add(this.stage3d, this.whale3d)
 
-    // 扫描线图案
-    const sc = mkCanvas(1, 3)
+    // 扫描线图案（T55：图案位图也按 res 放大，1 条线仍是 1 逻辑像素 —— res=2 时用 2 设备像素画得更实）
+    const sc = mkCanvas(RS, 3 * RS)
     const sg = sc.getContext('2d')
     sg.fillStyle = 'rgba(0,0,0,0.85)'
-    sg.fillRect(0, 0, 1, 1)
+    sg.fillRect(0, 0, RS, RS)
     this.scanPattern = this.gPost.createPattern(sc, 'repeat')
 
     this._vignette = null
@@ -116,7 +149,7 @@ export class Compositor {
 
   /** view 画布按 DPR 缩放；内部分辨率固定 1920×1080 */
   resize() {
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2)
+    this.dpr = this.dprFixed || Math.min(window.devicePixelRatio || 1, 2)
     this.view.width = Math.round(this.W * this.dpr)
     this.view.height = Math.round(this.H * this.dpr)
     this.view.style.width = '100vw'
@@ -147,7 +180,9 @@ export class Compositor {
   clearLayers() {
     for (const k of ['stageBack', 'stageFront', 'whale', 'ui']) {
       const { g } = this.layers[k]
-      g.setTransform(1, 0, 0, 1, 0, 0)
+      // T55：res>1 时这里也是唯一的"复位点"——把逻辑坐标→设备像素的变换装回去，
+      // 于是所有场景/UI 代码继续用 1920×1080 逻辑坐标画，画出来是原生 res 倍分辨率。
+      g.setTransform(this.res, 0, 0, this.res, 0, 0)
       g.clearRect(0, 0, this.W, this.H)
     }
   }
@@ -157,6 +192,7 @@ export class Compositor {
     this.post3d = await createPost3D(this.renderer, this.scene, this.camera, {
       width: this.W,
       height: this.H,
+      res: this.res,
       camera2: this.whaleCamera,
     })
     return this.post3d
@@ -169,10 +205,25 @@ export class Compositor {
     // 必须 **traverse**：`Object3D.layers` 是逐对象的，只给根节点 set() 的话，
     // 组合式物件（Group 套 Mesh，例如 src/lib/props/*）的子网格会留在 layer 0，
     // 而相机只看 layer 1/2 —— 于是"物件建好了却看不见"。
-    for (const c of this.stage3d.children) c.traverse((o) => o.layers.set(1))
+    // FIX_V5 §G1：带 `userData.noPost` 的终端屏面单独走 PANEL_LAYER（后处理后单独画）。
+    for (const c of this.stage3d.children) c.traverse((o) => o.layers.set(o.userData && o.userData.noPost ? PANEL_LAYER : 1))
     for (const c of this.whale3d.children) c.traverse((o) => o.layers.set(2))
+    /** 后处理之后的"面板 pass"：只画 PANEL_LAYER，不参与 bloom/径向/tone mapping */
+    const drawPanels = () => {
+      const r = this.renderer
+      const cam = this.camera
+      const prev = cam.layers.mask
+      cam.layers.set(PANEL_LAYER)
+      r.setRenderTarget(null)
+      r.autoClear = false
+      r.clearDepth()
+      r.render(this.scene, cam)
+      cam.layers.mask = prev
+      r.autoClear = true
+    }
     if (this.post3d && this.post3d.enabled) {
       this.post3d.render(t, p)
+      drawPanels()
       return
     }
     const r = this.renderer
@@ -182,6 +233,7 @@ export class Compositor {
     r.autoClear = false
     r.render(this.scene, this.whaleCamera)
     r.autoClear = true
+    drawPanels()
   }
 
   /** 合成 5 层 → comp → post（含后处理）→ view。layers 为 ?debug 的图层开关。 */
@@ -196,17 +248,21 @@ export class Compositor {
     const next = Math.max(0.6, Math.min(1, s))
     if (Math.abs(next - this.dprScale) < 1e-3) return false
     this.dprScale = next
-    this.renderer.setPixelRatio(next)
+    // T55：DPR 看门狗只在交互路径生效（导出模式不跑 rAF），这里乘上内部渲染倍率
+    this.renderer.setPixelRatio(this.res * next)
     this.renderer.setSize(this.W, this.H, false)
     return true
   }
 
   present(t, P = {}) {
     const { W, H } = this
+    // T55：res>1 时 comp 也是 res 倍大小 —— 这里用**逻辑坐标**的变换，下面的 drawImage 全部显式给
+    // 逻辑目标尺寸 (W,H)，于是 res=2 时是原生 3840×2160 的逐层合成，不是放大。
+    const RS = this.res
     const L = P.layers || { stage: true, whale: true, ui: true, fx: true, lyrics: true }
     const layerMask_three = P.three !== false
     const gc = this.gComp
-    gc.setTransform(1, 0, 0, 1, 0, 0)
+    gc.setTransform(RS, 0, 0, RS, 0, 0)
     gc.clearRect(0, 0, W, H)
     // 层序（F2a 修正）：**3D 是底层**，它自带不透明背景；2D 舞台与 DOM 层在它之上
     // 一律用 source-over 叠加。若再像之前那样用加法，比背景暗的 3D 物体（深紫茄子、
@@ -224,18 +280,18 @@ export class Compositor {
     }
     drawThree()
     if (L.stage) {
-      gc.drawImage(this.layers.stageBack.canvas, 0, 0)
-      gc.drawImage(this.layers.stageFront.canvas, 0, 0)
+      gc.drawImage(this.layers.stageBack.canvas, 0, 0, W, H)
+      gc.drawImage(this.layers.stageFront.canvas, 0, 0, W, H)
     }
-    if (L.whale) gc.drawImage(this.layers.whale.canvas, 0, 0)
-    if (L.ui) gc.drawImage(this.layers.ui.canvas, 0, 0)
+    if (L.whale) gc.drawImage(this.layers.whale.canvas, 0, 0, W, H)
+    if (L.ui) gc.drawImage(this.layers.ui.canvas, 0, 0, W, H)
 
     if (L.fx) this.applyPost(t, P)
     else {
       const g = this.gPost
-      g.setTransform(1, 0, 0, 1, 0, 0)
+      g.setTransform(RS, 0, 0, RS, 0, 0)
       g.clearRect(0, 0, W, H)
-      g.drawImage(this.comp, 0, 0)
+      g.drawImage(this.comp, 0, 0, W, H)
     }
 
     const vg = this.view.getContext('2d')
@@ -251,40 +307,38 @@ export class Compositor {
 
   applyPost(t, P) {
     const { W, H } = this
+    const RS = this.res
     const g = this.gPost
     const comp = this.comp
     const shake = P.shake || 0
     const glitch = P.glitch || 0
     const disp = P.dispersion || 0
     const crt = P.crtLevel == null ? 1 : P.crtLevel
+    const crtLine = P.crtLine == null ? 1 : Math.max(0, Math.min(1, P.crtLine))
     const flash = P.flash || 0
     const gi = Math.floor(t * 60)
 
-    g.setTransform(1, 0, 0, 1, 0, 0)
+    g.setTransform(RS, 0, 0, RS, 0, 0)
     g.clearRect(0, 0, W, H)
     g.globalAlpha = 1
     g.globalCompositeOperation = 'source-over'
 
     const ox = shake ? (hash01(gi, 41) * 2 - 1) * 16 * shake : 0
     const oy = shake ? (hash01(gi, 42) * 2 - 1) * 13 * shake : 0
-    const sy = crt < 0.999 ? Math.max(0.004, crt) : 1
+    // G7：CRT 开关机改用「裁剪/幕布」而不是缩放 —— 画面内容始终 1:1，纵横比不变。
+    // openCrt = 可见带的高度占比（1 = 全开，走快路径，逐像素与改动前一致）。
+    const openCrt = crt >= 0.999 ? 1 : Math.max(0.004, crt)
+    const crtCurtain = openCrt !== 1
 
-    // 基础合成（CRT 展开/收缩 = 垂直方向缩放）
-    g.save()
-    if (sy !== 1) {
-      g.translate(0, H / 2)
-      g.scale(1, sy)
-      g.translate(0, -H / 2)
-    }
-    g.drawImage(comp, ox, oy)
-    g.restore()
+    // 基础合成（1:1 直绘，不缩放；T55：显式 (W,H) 目标尺寸 —— comp 位图是 res 倍大小）
+    g.drawImage(comp, ox, oy, W, H)
 
     // 色散：红色与青色副本错位叠加（半分辨率，仅在需要时）
     if (disp > 0.03) {
       const d = 2 + disp * 16
       const drawTinted = (chan, color, alpha, dx) => {
         const a = this.gA
-        a.setTransform(1, 0, 0, 1, 0, 0)
+        a.setTransform(RS, 0, 0, RS, 0, 0)
         a.globalCompositeOperation = 'source-over'
         a.clearRect(0, 0, this.halfW, this.halfH)
         a.drawImage(comp, 0, 0, this.halfW, this.halfH)
@@ -310,7 +364,8 @@ export class Compositor {
         if (hash01(gi * 31 + b, 7) > 0.72 - glitch * 0.25) {
           const dx = (hash01(gi * 31 + b, 8) * 2 - 1) * 34 * glitch
           const by = b * bh
-          g.drawImage(comp, 0, by, W, bh, dx, by, W, bh)
+          // ⚠️ 源矩形是**位图像素**、不受当前变换影响 ⇒ res>1 时必须乘 RS（否则只取左上角一小块）
+          g.drawImage(comp, 0, by * RS, W * RS, bh * RS, dx, by, W, bh)
         }
       }
       for (let k = 0; k < 3; k++) {
@@ -322,24 +377,34 @@ export class Compositor {
       }
     }
 
-    // CRT 亮线（展开/收缩边缘）
-    if (sy !== 1) {
-      const edge = (H / 2) * (1 - sy)
-      g.fillStyle = 'rgba(210,240,255,0.85)'
-      g.fillRect(0, edge, W, 2)
-      g.fillRect(0, H - edge - 2, W, 2)
-      g.fillStyle = 'rgba(120,200,255,0.25)'
-      g.fillRect(0, edge + 2, W, 6)
-      g.fillRect(0, H - edge - 8, W, 6)
+    // CRT 幕布 + 亮线（G7）：上下黑帘向外退开（开机）/ 向内合拢（关机），
+    // 可见带的两条边缘亮线在 openCrt→0 时于正中合为"一道亮线"。
+    // FIX_V5 §3 自检（T55）用：暴露本帧幕布几何（逻辑像素）与展开度。只读，渲染不消费。
+    this.crtBand = null
+    if (crtCurtain) {
+      const bandH = Math.max(2, Math.round(H * openCrt))
+      const bandY = Math.round((H - bandH) / 2)
+      const glow = Math.max(1, Math.min(6, bandH - 2))
+      this.crtBand = { level: openCrt, bandY, bandH, line: crtLine }
+      g.fillStyle = '#000'
+      g.fillRect(-40, -40, W + 80, bandY + 40)
+      g.fillRect(-40, bandY + bandH, W + 80, H - bandY - bandH + 40)
+      g.fillStyle = `rgba(210,240,255,${(0.85 * crtLine).toFixed(3)})`
+      g.fillRect(0, bandY, W, 2)
+      g.fillRect(0, bandY + bandH - 2, W, 2)
+      g.fillStyle = `rgba(120,200,255,${(0.25 * crtLine).toFixed(3)})`
+      g.fillRect(0, bandY + 2, W, glow)
+      g.fillRect(0, bandY + bandH - 2 - glow, W, glow)
     }
 
     // 泛光：低分辨率模糊回叠
     const bloomAmt = P.bloom == null ? 0.16 : P.bloom
     if (bloomAmt > 0.001) {
-      const bw = this.bloom.width
-      const bh2 = this.bloom.height
+      // T55：位图尺寸 = (W>>2)*res，解算仍按**逻辑**四分之一分辨率（保持与 1080p 版同样的模糊半径）
+      const bw = this.W >> 2
+      const bh2 = this.H >> 2
       const gb = this.gBloom
-      gb.setTransform(1, 0, 0, 1, 0, 0)
+      gb.setTransform(RS, 0, 0, RS, 0, 0)
       gb.clearRect(0, 0, bw, bh2)
       gb.globalCompositeOperation = 'source-over'
       gb.drawImage(comp, 0, 0, bw, bh2)
@@ -352,7 +417,7 @@ export class Compositor {
 
     // 扫描线（Always 极轻；CRT 期间加强）
     if (this.scanPattern) {
-      g.globalAlpha = 0.05 + (sy !== 1 ? 0.22 : 0) + glitch * 0.1
+      g.globalAlpha = 0.05 + (crtCurtain ? 0.22 : 0) + glitch * 0.1
       g.fillStyle = this.scanPattern
       g.fillRect(0, 0, W, H)
       g.globalAlpha = 1

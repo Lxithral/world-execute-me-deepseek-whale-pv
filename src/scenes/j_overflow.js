@@ -1,11 +1,12 @@
 // src/scenes/j_overflow.js — 段 J 2:09–2:27.9 溢出（纯器乐，红色段）
-// DIRECTOR：底色转红警报；KV Cache 内存格：分配→标记→清扫→压缩，旁边滚动 hexdump；
-// 窗口无限递归缩放；ctxAt 加速到 100%；2:25 全屏 context limit reached；2:26.5 黑场，
-// 红字重新键入 dsh --resume；2:27.8 静默一帧。
+// DIRECTOR：底色深蓝灰 + 仅边缘红暗角；KV Cache 内存格：分配→标记→清扫→压缩，旁边滚动 hexdump；
+// 窗口无限递归缩放；ctxAt 加速到 100%；2:24.9 全屏 context limit reached（百分比垂直 38%、提示 64%）；
+// 2:24.5 碎散 → 2:25.6 黑场 → 2:25.8 红字逐字键入 dsh --resume 并回车 → 2:27.9 硬切。
 
 import { C, rgba, mixHex } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic, inOutCubic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
+import { fx } from '../core/fx.js'
 import { MONO, hexdump, roundRect, ctxAt } from '../ui/dsh.js'
 import { typed, cursorOn } from '../ui/typing.js'
 import { kvSchedule } from '../lib/tables.js'
@@ -15,6 +16,31 @@ import { dialogueOf } from '../data/dialogue.js'
 import * as THREE from 'three'
 
 const RESUME = 'dsh --resume'
+/* ---- §J 2:27 的显式时间轴（这一条是硬时间，优先于锚点表里的同名条目）----
+ *   碎裂 2:24.5–2:25.6（T_SHATTER…T_BLACK）→ 黑场自 2:25.6（T_BLACK）
+ *   → 2:25.8 起逐字键入（T_TYPE）→ 2:27.2 回车（T_ENTER）→ 2:27.9 硬切（T_QUIET）
+ *   键入全程 1.4s 打完 12 个字符 ⇒ 目标 ~8.6 字/秒；但 typed() 默认 jitter=0.35，
+ *   E[1/(1+0.35u)] > 1 ⇒ 实际输出慢于 cps。用同参数实测：cps=11 时 12 字在 147.102s 打完
+ *   （cps=8.571 要到 147.470s，spec 的 2:27.2 前打不完）⇒ 取 11。
+ */
+const T_SHATTER = 144.5
+const T_BLACK = 145.6
+const T_TYPE = 145.8
+const T_ENTER = 147.2
+const T_QUIET = 147.88
+const TYPE_CPS = 11
+/* ---- §J 2:26「context limit reached」与大百分比同屏的窗口 ----
+ *   锚点表里的 limit onset 实测是 **145.5**（不是兜底值 144.9），而 §J 2:27 又要求
+ *   黑场自 145.6 起 ⇒ 旧写法 `span(t,tLimit,tLimit+0.45)`（span 过右端后恒为 1）
+ *   会把整块 limit 屏压到 0.1s 内、实际一帧都看不见。这里改为显式窗口：
+ *   144.20 淡入 → 144.75 满 → 145.25 起淡出 → 145.58 归零（压在黑场 145.6 之前）。
+ *   ctxAt 在 145.0 到 100%，所以满幅窗口（144.75–145.25）正好跨在"到顶"那一拍上。
+ *   ⚠️ main.js drawHud 用同一组数字把百分比挪到垂直 38%（T_LIMIT_IN / T_BLACK）。
+ */
+const T_LIMIT_IN = 144.2
+const T_LIMIT_FULL = 144.75
+const T_LIMIT_F0 = 145.25
+const T_LIMIT_F1 = 145.58
 const KV_COLS = 16
 const KV_ROWS = 6
 
@@ -26,11 +52,20 @@ export default {
   fx: [
     { t: 129.0, kind: 'flash', amount: 0.6, dur: 0.18 },
     { t: 129.0, kind: 'glitch', amount: 0.5, dur: 0.3 },
-    { t: 136.0, kind: 'shake', amount: 0.35, dur: 0.4 },
-    { t: 140.0, kind: 'shake', amount: 0.5, dur: 0.4 },
+    // §J 2:23：去掉横条后，张力由「抖动 / 切片故障加强」等补回 ⇒ 抬 amount 与 dur
+    { t: 136.0, kind: 'shake', amount: 0.5, dur: 0.5 },
+    { t: 140.0, kind: 'shake', amount: 0.7, dur: 0.5 },
+    // T55 终验 t)：这里原来还有一条 `{ t: 144.5, kind: 'shake', amount: 0.8, dur: 0.6 }`，
+    // 它与下面 145.0 那条**是同一个抖动事件**（144.5+0.6 = 145.1，和 145.0 直接重叠 0.1s），
+    // 于是同时踩了 t) 的两条判据：相邻同类间隔 0.5s < 0.6s，且 [140,146) 窗口内 shake 3 次 > 2 次。
+    // 判据的意图就是「同类效果不得在短窗口里重复堆叠」，所以这里是**合并**（保留更强的那条：
+    // 145.0 amount 1.0 / dur 1.0，峰值正落在闪白那一拍），不是放宽门槛。
+    // §J 2:27 要求的「碎裂 2:24.5–2:25.6」不受影响：碎裂由本场景自己的 T_SHATTER→T_BLACK 时间轴驱动
+    // （见文件顶部注释与本文的 shatter/crack 计算），不是由这条 fx 驱动的。
     { t: 145.0, kind: 'flash', amount: 1.0, dur: 0.3 },
-    { t: 145.0, kind: 'shake', amount: 0.9, dur: 0.8 },
-    { t: 146.5, kind: 'glitch', amount: 0.8, dur: 0.3 },
+    { t: 145.0, kind: 'shake', amount: 1.0, dur: 1.0 },
+    // §J 2:27：黑场自 2:25.6 起 ⇒ 切片故障的收尾脉冲同步提前到 145.6
+    { t: 145.6, kind: 'glitch', amount: 1.0, dur: 0.5 },
   ],
 
   /**
@@ -87,61 +122,142 @@ export default {
 
   render(t, lt, ctx) {
     const { g, W, H, sync } = ctx
-    const black = span(t, 146.5, 146.72)
-    const quiet = t >= 147.75 && t < 147.9
+    /* ---- T55 / `?selftest` g)：段 J 的时间轴**本来就来自锚点表**（src/core/anchors.js 的
+     * J 段声明了 start / kvFill / illegal / limit / blackout / resume 六个锚点），但此前这一整段
+     * 被抄成了上面的字面常量 ⇒ g) 报「段落无已消费锚点：J」。这里改回经 ctx.cues 消费锚点，
+     * 兜底值就是原常量（锚点缺失或解析失败时与旧实现逐帧一致）。
+     * 关键：被接上的五个锚点**实测值与原常量逐条相等**
+     * （start 129.0 / illegal 131.396 / limit 145.5 / blackout 145.6 / resume 145.8），
+     * 所以偏差 dX = 0，画面**逐帧不变** —— 这是"把已经存在的锚点接上"，
+     * 不改画面、不碰任何判据与阈值。
+     * `kvFill` 有意不绑：它声明的拍是 132.8，而 KV 填充起点是 init() 里的 kvSchedule t0=130.5，
+     * 两者差 2.3s；本轮是终验，绑上会改变 J2 画面 ⇒ 登记为已知不一致（见 docs/CHECKPOINT.md）。
+     */
+    const anc = (k, fb) => {
+      try {
+        return ctx.cues.sec('J', k, fb)
+      } catch (e) {
+        return fb
+      }
+    }
+    const tStart = anc('start', 129.0)
+    const dIllegal = anc('illegal', 131.396) - 131.396
+    const dLimit = anc('limit', 145.5) - 145.5
+    const tBlack = anc('blackout', T_BLACK)
+    const tType = anc('resume', T_TYPE)
+    const black = span(t, tBlack, tBlack + 0.22)
+    const quiet = t >= T_QUIET && t < 147.9
 
-    // 红警报底
-    const alarm = span(t, 129.0, 131.0)
+    // §J 2:23：底色改**深蓝灰**（原为红警报底 '#160a0c'→'#3a0d10'）
+    const alarm = span(t, tStart, tStart + 2.0)
     const pct = ctxAt(t)
     const heat = clamp((pct - 20) / 80)
     const pulse = 0.5 + 0.5 * Math.sin(t * (3 + heat * 7))
+    /* ⚠️ T50 实测：`compositor.bgIs3d` **恒为 true**（src/core/compositor.js:111）⇒ 段 J 里真正
+     * 可见的"背景"是 3D 画布的 clear color（#0b0d12），下面那段 `!bgIs3d` 的 2D 底色是死代码。
+     * 所以「背景改为深蓝灰」必须在这里落地：用一层**加法**（`lighter`）的深蓝灰雾把整段黑位抬到
+     * 蓝灰。用加法而不是覆盖，是为了不压暗体素立方体与碎片（覆盖会把它们洗灰、亮度反而降）。
+     * 它同时补上了 T23b 用红横条撑住的 §6「平均亮度 ≥0.10」：
+     * 实测去掉横条后 133.5–140.5s 只有 0.077–0.099（u) 会 FAIL）。 */
+    if (ctx.bgIs3d) {
+      g.save()
+      g.globalCompositeOperation = 'lighter'
+      g.fillStyle = 'rgb(23,30,42)'
+      g.fillRect(0, 0, W, H)
+      g.restore()
+    }
     if (!ctx.bgIs3d) {
-      g.fillStyle = mixHex('#160a0c', '#3a0d10', 0.5 + 0.5 * heat)
+      g.fillStyle = mixHex('#0f141b', '#1e2836', 0.5 + 0.5 * heat)
       g.fillRect(0, 0, W, H)
-      g.fillStyle = rgba(C.red, 0.05 + 0.12 * heat * pulse)
+      g.fillStyle = rgba(C.red, 0.04 + 0.08 * heat * pulse)
       g.fillRect(0, 0, W, H)
-      g.fillStyle = rgba(C.red, 0.13)
+      // 竖红条保留（T23b 给 b)/§6 的长直边来源之一），alpha 13% → 略升以补横条的亮度
+      g.fillStyle = rgba(C.red, 0.16 + 0.05 * heat)
       for (let x = 0; x < W; x += 8) g.fillRect(x, 0, 4, H)
     }
 
-    // ---- §7 段 J：「红色频闪随 rms 渐强」 ----
-    // 以前这一条只有一层**整屏红 tint**（`fillRect(0,0,W,H)`，没有任何内部边缘），
-    // 于是 `?selftest` b) 在 135–137s 的边缘像素一直卡在 3.7–3.9%（要求 ≥4%）：
-    // 那一帧非众数占比高达 75%，内容并不少 —— 缺的就是**降采样后仍能读到的长直边**。
-    // 现在改成整屏宽的硬边警示条：强度由 heat × rms 驱动（既落实"频闪随 rms 渐强"，
-    // 又给画面提供横向长边）。取 10px 条高 / 54px 周期：在 480×270 的扫描口径下
-    // 约合 2.5px，仍高于 Sobel 的可分辨尺度。
+    // ---- §J 2:23：「去掉背景红色横条」，张力改由下列四条补回 ----
+    // 旧实现是整屏宽的 14px/48px 红横条（覆盖约 29% 画面、且落在画面中部）⇒ 与规格冲突。
+    // 但它同时是 T23b 给 `?selftest b)`（边缘像素 ≥4%）与 §6（平均亮度 ≥0.10）的兜底，
+    // 所以替换物必须**同样提供降采样后仍可读的长直边，但只出现在边缘**：
+    //   · 边缘红色暗角：radial gradient，中心完全透明，alpha 随 rms 脉动（仅边缘）；
+    //   · 径向速度线：从 0.30R 射向外缘，提供大量沿半径方向的长直线；
+    //   · 切片故障：横幅错位带（w 段宽 = 长直边），由 fx.glitch(t) 与 rms 共同驱动。
     {
-      const rms = sync.rmsAt(t)
-      // ⚠️ `flash` **不能**只正比于 `heat`：heat = (ctx%−20)/80，在段 J 开头（ctx≈20%）几乎是 0，
-      // 于是 129–131s 一条警示条都不画，画面掉到 mean=0.051/0.072/0.088（§6 要求 ≥0.10）。
-      // 改成"从段首就亮起、再由 rms 与 heat 加强"，才既落实「红色频闪随 rms 渐强」，
-      // 又让整段的平均亮度站得住。
-      const flash = clamp(alarm * (0.55 + 0.45 * clamp(rms * 1.7) + 0.30 * heat))
-      if (flash > 0.02) {
+      const rms = clamp(sync.rmsAt(t))
+      const cx0 = W / 2
+      const cy0 = H * 0.46
+      const R = Math.hypot(W * 0.5, H * 0.5)
+      // (1) 仅边缘的红色暗角
+      /* T55 终验 v)：这层「仅边缘」的红色暗角峰值正好落在**四角**，实测把四角（判据 48×27 小块）
+       * 抬到 0.13–0.17，超 §2.4「任何非闪白时刻四角 ≤0.12」（134.5–141s 整段 FAIL，见 REVIEW_T55）。
+       * 它是角部**专属**的亮度来源（几何上 0.40R 处全透明、1.02R 处最亮），而「降采样后仍可读的
+       * 长直边」这一职责由下面 (1b) 的上下扫描带与 (2) 的径向速度线承担（b) 在本段有 15–23% 的
+       * 边缘密度、门槛只要 4%）⇒ 只收角部强度，不动几何、不动结构、不动其它段。
+       * 倍率 0.35 由 v) 的判据反推（0.147 → ≈0.10），远角颜色同时压深以保留红色相。 */
+      const vig = clamp(0.16 + 0.34 * clamp(rms * 1.6) + 0.10 * heat) * (0.72 + 0.28 * pulse) * 0.35
+      const rg = g.createRadialGradient(cx0, cy0, R * 0.40, cx0, cy0, R * 1.02)
+      rg.addColorStop(0, 'rgba(255,60,60,0)')
+      rg.addColorStop(0.58, `rgba(255,70,70,${(vig * 0.30).toFixed(3)})`)
+      rg.addColorStop(1, `rgba(224,84,84,${vig.toFixed(3)})`)
+      g.fillStyle = rg
+      g.fillRect(0, 0, W, H)
+      /* (1b) 仅上下边缘的红色扫描带（硬边、长直边）—— 这是"去掉背景红色横条"的合规替代：
+       *      旧横条是整屏 14px/48px、覆盖约 29% 的**中部**画面；这里只在 y<12% 与 y>88%
+       *      两条**边缘**带里画，中部 76% 一条都不画。它是 b) 的"边缘像素 ≥4%"与 §6 亮度
+       *      的主要来源（T50 实测：没有它时 129.0–130.0s 的边缘只有 3.0–3.3%）。
+       *      强度仍是 §7 的"红色频闪随 rms 渐强"。 */
+      const strobe = clamp(0.34 + 0.36 * clamp(rms * 1.5) + 0.20 * heat) * (0.72 + 0.28 * pulse)
+      if (strobe > 0.02) {
         g.save()
-        g.fillStyle = `rgba(255,116,116,${(0.34 + 0.46 * flash).toFixed(3)})`
-        // 14px 条高 / 48px 周期：覆盖约 29% 的画面，在 480×270 口径下约合 3.5px，
-        // 既是"降采样后仍能读到的长直边"，也把这一段的平均亮度抬到 §6 的下限之上。
-        for (let y = 0; y < H; y += 48) g.fillRect(0, y, W, 14)
+        g.fillStyle = `rgba(255,92,92,${(strobe * 0.78).toFixed(3)})`
+        // T55 终验 v)：横带只画中间 80%（x ∈ [0.10W, 0.90W]）。判据的「四角」是左右各 10% 宽、
+        // 上下各 10% 高的 48×27 小块，而这两条带的 alpha 在强 rms 时能到 ~0.7，正好把四个角抬
+        // 过 0.12；裁掉两端后角部只剩下面收过强度的红色暗角。长直边仍在上下边缘提供，
+        // b) 实测 16–25%（门槛 4%）。
+        const bx0 = W * 0.10
+        const bw = W * 0.80
+        for (let y = 0; y < H * 0.12; y += 26) g.fillRect(bx0, y, bw, 14)
+        for (let y = H * 0.88; y < H; y += 26) g.fillRect(bx0, y, bw, 14)
         g.restore()
       }
-      /* ⚠️ T23b：竖向硬边条**不能**画在这里 —— 它会被后面那块「context limit reached」
-       * 的全屏 `rgba(0,0,0,0.72)` 罩住（实测 t=146.0 的 ed 因此只有 0.035）。
-       * 见下面 limit 块内部的重画。 */
+      // (2) 径向速度线（长短不一，红/琥珀交替；只在画面外圈）
+      const NL = 104
+      const lineA = clamp(0.22 + 0.46 * clamp(rms * 1.8)) * (0.45 + 0.55 * pulse) * (0.35 + 0.65 * heat)
+      if (lineA > 0.02) {
+        g.save()
+        for (let i = 0; i < NL; i++) {
+          const a = (i / NL) * TAU + hash01(i, 611) * 0.05
+          const r0 = R * (0.30 + 0.44 * hash01(i, 612))
+          const r1 = Math.min(R * 1.06, r0 + R * (0.08 + 0.30 * hash01(i, 613)))
+          g.globalAlpha = clamp(lineA * (0.45 + 0.55 * hash01(i, 614)))
+          g.strokeStyle = i % 3 === 0 ? rgba(C.amber, 0.75) : rgba(C.red, 0.8)
+          g.lineWidth = 2.2 + hash01(i, 615) * 4.4
+          g.beginPath()
+          g.moveTo(cx0 + Math.cos(a) * r0, cy0 + Math.sin(a) * r0)
+          g.lineTo(cx0 + Math.cos(a) * r1, cy0 + Math.sin(a) * r1)
+          g.stroke()
+        }
+        g.restore()
+      }
+      // (3) 切片故障加强（由 fx 声明表 + rms + heat 驱动；黑场前的收尾脉冲在 145.6）
+      drawSliceGlitch(g, ctx, t, clamp(fx.glitch(t) + clamp(rms * 1.2) * 0.5 + heat * 0.3))
     }
 
     if (!quiet) {      // hexdump
-      const hdA = span(t, 130.6, 131.4) * (1 - span(t, 145.6, 146.4))
+      // 窗口端点按 illegal 锚点（131.396）的偏差平移；dIllegal 实测 = 0 ⇒ 与旧字面值逐帧一致
+      const hdA = span(t, 130.6 + dIllegal, 131.4 + dIllegal) * (1 - span(t, 145.0, tBlack))
       if (hdA > 0.01) {
         g.save()
         g.globalAlpha = hdA
-        hexdump(g, { x: W * 0.63, y: H * 0.30, w: W * 0.32, alpha: 0.9, rows: 16, scroll: t * 26, seed: 5, size: 13 })
-        g.font = MONO(12, 600)
+        // T41（FIX_V5 §G1/§2.3）：13px → 34px；每行 27 字符 ×20.4 ≈ 551px，
+        // 从 W*0.63 起右缘 1760 < 95%W（G5 安全区）；行数由可用高度截断（到底 834 < 0.80H）。
+        hexdump(g, { x: W * 0.63, y: H * 0.30, w: W * 0.32, alpha: 0.9, rows: 16, scroll: t * 26, seed: 5, size: 34, cols: 6, maxH: H * 0.80 - H * 0.30 })
+        g.font = MONO(34, 600)
         g.fillStyle = C.red
         g.textAlign = 'left'
         g.textBaseline = 'top'
-        g.fillText('kv-cache dump  (live)', W * 0.63, H * 0.27)
+        g.fillText('kv-cache dump  (live)', W * 0.63, H * 0.25)
         g.restore()
       }
       // ⚠️ T11 / §1.8：「整个**删除嵌套窗口套娃**，也**不要任何静止矩形**」——
@@ -155,29 +271,28 @@ export default {
       const cam = ctx.three.camera
       const CUBE_D = 3.15
       // J1 2:09.0–2:13：每个起音点一块石板砸来并碎裂
-      const j1 = t >= 128.7 && t < 133.4
+      const j1 = t >= tStart - 0.3 && t < 133.4
       this.slabs.object.position.set(cam.position.x, cam.position.y, cam.position.z)
-      if (j1) this.slabs.update(t, this.j1Onsets, 129.0)
-      else this.slabs.update(t, [], 129.0)
+      if (j1) this.slabs.update(t, this.j1Onsets, tStart)
+      else this.slabs.update(t, [], tStart)
       // J2 2:13–2:17：逐块分配生长 + 相机环绕 + 蓝→琥珀
       const grow = clamp(span(t, 133.0, 136.6))
       // J3 2:17–2:21：扫描平面扫过 → 变红弹出 → 其余压缩成致密块
       const scanZ = -0.72 + 1.44 * clamp(span(t, 137.0, 139.4))
       const eject = span(t, 138.2, 139.4) * (1 - span(t, 140.6, 141.4))
       const compress = clamp(span(t, 139.6, 141.0))
-      const cubeA = clamp(span(t, 133.0, 133.6)) * (1 - span(t, 145.2, 145.9))
+      const cubeA = clamp(span(t, 133.0, 133.6)) * (1 - span(t, 145.0, tBlack))
       const paletteU = clamp(span(t, 133.6, 136.4))
       const spin = t * 0.16 + (t >= 133 && t < 137 ? 0.25 * Math.sin((t - 133) * 1.1) : 0)
       /* ---- J4 2:21–2:25：立方体发光裂纹 + 相机推进 + 抖动随 rms 渐强 ---- */
-      const j4 = clamp(span(t, 141.0, 141.8)) * (1 - span(t, 144.9, 145.1))
+      const j4 = clamp(span(t, 141.0, 141.8)) * (1 - span(t, 144.2, T_SHATTER))
       const crackU = j4
       // 相机推进：立方体朝相机逼近（沿 z 推进，观感=镜头推近）
       const push = j4 * 0.85
       // 抖动随 rms 渐强（§1.8 原文）
       const jit = j4 * clamp(sync.rmsAt(t) * 2.2) * 0.055
-      /* ---- J5 2:25–2:26.5：粉碎成数千碎片 + 冲击波 + 全屏闪红 ---- */
-      const tShatter = 145.0
-      const shatter = clamp((t - tShatter) / 0.55) * (1 - span(t, 146.35, 146.6))
+      /* ---- J5 2:24.5–2:25.6：粉碎成数千碎片 + 冲击波 + 全屏闪红（§J 2:27 提前）---- */
+      const shatter = clamp((t - T_SHATTER) / (tBlack - T_SHATTER)) * (1 - span(t, tBlack, tBlack + 0.2))
       this.cube.object.position.set(
         cam.position.x + (hash01(Math.floor(t * 60), 811) * 2 - 1) * jit,
         cam.position.y + 0.02 + (hash01(Math.floor(t * 60), 812) * 2 - 1) * jit,
@@ -200,13 +315,14 @@ export default {
         g.restore()
       }
       // J4 的发光裂纹（2D 叠加：从中心向外生长的锯齿折线）
+      // §J 2:23：「立方体裂纹发光加强」⇒ 线宽 2.5→4.5、外发光 18→34、alpha 0.9→1
       if (crackU > 0.01) {
         g.save()
-        g.globalAlpha = crackU * 0.9
-        g.strokeStyle = rgba(C.red, 0.95)
-        g.lineWidth = 2.5
-        g.shadowColor = rgba(C.red, 0.9)
-        g.shadowBlur = 18
+        g.globalAlpha = crackU
+        g.strokeStyle = rgba(C.red, 0.98)
+        g.lineWidth = 4.5
+        g.shadowColor = rgba(C.red, 0.95)
+        g.shadowBlur = 34
         const cx0 = ctx.W / 2
         const cy0 = ctx.H * 0.46
         for (let i = 0; i < 14; i++) {
@@ -258,7 +374,7 @@ export default {
           cam.position.y + P.sp.y,
           cam.position.z - d
         )
-        P.monitor.object.rotation.y = P.sp.side === 'R' ? -0.30 : 0.30
+        P.monitor.object.rotation.y = P.sp.side === 'R' ? -0.04 : 0.04 // FIX_V5 §G1：倾斜 ≤6°，基准角预算 ≤0.04rad
         // 越近越淡：离开"远景"时按 §2.4 的远景豁免（α ≤0.3）退场
         const alpha = tunU * clamp(1 - ph * 1.15)
         P.pane.tick(t, { appearAt: 130.2, parallax: { x: 0, y: 0 }, glitch: 0.1 * sync.pulse(t, 170) })
@@ -275,38 +391,44 @@ export default {
       }
     }
 
-    // 2:25 全屏 context limit reached
-    const tLimit = ctx.cues.sec('J', 'limit', 144.9)
-    const tBlack = ctx.cues.sec('J', 'blackout', 146.5)
-    const limit = span(t, tLimit, tLimit + 0.45) * (1 - span(t, tBlack - 0.45, tBlack))
+    // 2:24.9 全屏 context limit reached（§J 2:26：百分比 38% / 提示 64%，两者盒不得相交）
+    // 注：锚点 limit onset 实测 145.5（= T_LIMIT_* 的基准），下面四个端点整体按 dLimit 平移
+    const limit =
+      span(t, T_LIMIT_IN + dLimit, T_LIMIT_FULL + dLimit) * (1 - span(t, T_LIMIT_F0 + dLimit, T_LIMIT_F1 + dLimit))
     if (limit > 0.01) {
       g.save()
       g.globalAlpha = limit
-      g.fillStyle = 'rgba(0,0,0,0.72)'
+      // 碎散开始后让黑罩逐步透开，别把立方体的爆散整个压平（145.6 时 shatter=1）
+      const shatterU = clamp((t - T_SHATTER) / (tBlack - T_SHATTER))
+      g.fillStyle = `rgba(0,0,0,${(0.72 * (1 - 0.5 * shatterU)).toFixed(3)})`
       g.fillRect(0, 0, W, H)
+      // 提示文字放**垂直 64%**，字号 74px（≥60px），与中央巨字（38%）之间留 ≥一行字高
       g.font = MONO(74, 700)
       g.fillStyle = C.red
       g.textAlign = 'center'
       g.textBaseline = 'middle'
-      g.fillText('context limit reached', W / 2, H * 0.46)
+      g.fillText('context limit reached', W / 2, H * 0.64)
       /* ---- T23b：把 §7 J 的「红色频闪」**竖向硬边条**画在这块全屏黑之后 ----
        * 全量验收 b) 实测 **146.0s 边缘只有 3.5%**：那一段的立方体碎散是弥散粒子、
        * 而横条又整片被上面 0.72 的黑罩压平 ⇒ 降采样后没有可读的长直边。
        * 竖向条（12px / 72px 周期 ⇒ 480×270 口径下 4px / 48px）补回边缘密度，
        * 且仍属 §7「红色频闪随 rms 渐强」（rms 越高越明显），alpha 仅 0.22 ⇒ 不改变亮度上限。
        */
-      const vBar = clamp(span(t, 144.5, 145.3)) * (1 - clamp(span(t, 146.28, 146.5))) * clamp(0.35 + 0.65 * clamp(sync.rmsAt(t) * 1.6))
+      const vBar =
+        clamp(span(t, T_LIMIT_IN + dLimit, T_LIMIT_FULL + dLimit)) *
+        (1 - clamp(span(t, T_LIMIT_F0 + dLimit, T_LIMIT_F1 + dLimit))) *
+        clamp(0.35 + 0.65 * clamp(sync.rmsAt(t) * 1.6))
       if (vBar > 0.02) {
         g.fillStyle = `rgba(255,150,150,${(0.22 * vBar).toFixed(3)})`
         for (let x = 0; x < W; x += 72) g.fillRect(x, 0, 12, H)
       }
-      g.font = MONO(24, 600)
+      g.font = MONO(34, 600)
       g.fillStyle = rgba(C.red, 0.85)
-      g.fillText('the session is full.', W / 2, H * 0.56)
+      g.fillText('the session is full.', W / 2, H * 0.715)
       g.restore()
     }
 
-    // 2:26.5 黑场 + 红字重新键入 dsh --resume
+    // 2:25.6 黑场 + 2:25.8 起红字逐字键入 dsh --resume（2:27.2 回车，2:27.2–2:27.9 停留）
     if (black > 0.01) {
       g.save()
       g.globalAlpha = black
@@ -314,7 +436,10 @@ export default {
       g.fillRect(0, 0, W, H)
       // ⚠️ T12 / §1.9：字号 **≥110px**、**居中**、等宽、红色；
       // 原来写的是 `MONO(46)` + 左对齐 (W/2−260)，两条都不满足。
-      const s = typed(RESUME, t, { start: tBlack + 0.15, cps: 12, seed: 3 })
+      const typing = typed(RESUME, t, { start: tType, cps: TYPE_CPS, seed: 3 })
+      // 2:27.2 回车：命令打完后追加一个回车标记，表示"必须完整播完再切走"
+      const done = t >= T_ENTER
+      const s = typing && done ? typing + ' ⏎' : typing
       if (s) {
         g.font = MONO(112, 700)
         g.fillStyle = C.red
@@ -331,12 +456,32 @@ export default {
       g.restore()
     }
 
-    // 2:27.8 静默一帧：纯黑（下一段 K 从 147.9 无缝接上）
+    // 2:27.9 硬切前一帧纯黑（下一段 K 从 147.9 无缝接上）
     if (quiet) {
       g.fillStyle = '#000'
       g.fillRect(0, 0, W, H)
     }
   },
+}
+
+/** 切片故障（横幅错位 + 色偏）：与 k_storm.js 的 hit10 同一手法，段 J 由 fx.glitch + rms 驱动 */
+function drawSliceGlitch(g, ctx, t, u) {
+  if (!(u > 0.02)) return
+  const { W, H } = ctx
+  const SLICES = 9
+  g.save()
+  for (let i = 0; i < SLICES; i++) {
+    const y = (i * 137 + Math.floor(t * 9) * 53) % H
+    const h = 10 + ((i * 7) % 26)
+    const dx = (hash01(i, 777) * 2 - 1) * 150 * u
+    g.globalAlpha = 0.5 * u
+    g.fillStyle = i % 2 ? 'rgba(255,120,140,0.5)' : 'rgba(255,190,120,0.42)'
+    g.fillRect(dx, y, W, h)
+    g.globalAlpha = 0.25 * u
+    g.fillStyle = 'rgba(0,0,0,0.8)'
+    g.fillRect(dx + 6, y + 2, W, Math.max(2, h - 6))
+  }
+  g.restore()
 }
 
 /* ---------------- KV 内存格 ---------------- */

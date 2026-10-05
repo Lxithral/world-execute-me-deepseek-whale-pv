@@ -11,7 +11,7 @@ import { createToggle, createSwitchToggle } from './toggle.js'
 import { createTunnel, coverageReport } from './tunnel.js'
 import { createKVCache, kvFillAt } from './kvcache.js'
 import { createHeart } from './heart.js'
-import { createTermPane, PANE_W, PANE_H, MAX_LINES } from './termpane.js'
+import { createTermPane, PANE_W, PANE_H, MAX_LINES, SCALE } from './termpane.js'
 import { createMonitor } from './monitor.js'
 import { getEnv, createLightRig, applyEnv, resetEnv } from './env.js'
 
@@ -242,8 +242,19 @@ export function selfCheck(o = {}) {
   {
     // §2.2 的形状与纪律
     const tp = createTermPane({ session: '#001', side: 'L' })
-    push('TermPane 画布 1024×640', tp.canvas.width === 1024 && tp.canvas.height === 640,
-      `${tp.canvas.width}×${tp.canvas.height}`)
+    /* T55 对账（判据改**更严**，不是放宽）：原来这条断言的是**裸画布** 1024×640，与
+     * FIX_V5 §0 G1「面板纹理宽 ≥2048、清晰度不依赖 DPR」冲突 —— §2.2 的 1024×640 是
+     * **逻辑坐标**，画布按 SCALE 超采样成 2048×1280（`termpane.js` 的 PANE_W/H × SCALE，
+     * 绘制时 setTransform(SCALE)）。于是这条自检会把一个**正确**的实现判失败（q2 1/40）。
+     * 现在同时钉住三件事：逻辑尺寸 × SCALE、§G1 的 ≥2048、以及高宽比。 */
+    push(
+      `TermPane 画布 = §2.2 ${PANE_W}×${PANE_H} × SCALE ${SCALE} = ${PANE_W * SCALE}×${PANE_H * SCALE}（§G1 纹理宽 ≥2048）`,
+      tp.canvas.width === PANE_W * SCALE &&
+        tp.canvas.height === PANE_H * SCALE &&
+        tp.canvas.width >= 2048 &&
+        tp.canvas.width / tp.canvas.height === PANE_W / PANE_H,
+      `${tp.canvas.width}×${tp.canvas.height}（逻辑 ${PANE_W}×${PANE_H} ×SCALE ${SCALE}）`
+    )
     push('TermPane 是 pane：depthTest 开 / depthWrite 关 / renderOrder<0',
       tp.material.depthTest !== false && tp.material.depthWrite === false && tp.mesh.renderOrder < 0,
       `depthTest=${tp.material.depthTest !== false} depthWrite=${tp.material.depthWrite === false} renderOrder=${tp.mesh.renderOrder}`)

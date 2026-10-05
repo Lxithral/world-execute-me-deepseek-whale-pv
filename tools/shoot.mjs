@@ -231,7 +231,24 @@ async function main() {
       console.log('eval =>', shown)
     }
     if (args.out) {
-      const dataUrl = await cdp.evaluate('document.getElementById("stage").toDataURL("image/png")')
+      // T55 修正：截图必须与**成片**同源。导出路径（src/main.js:1412-1413）是
+      // `comp.view`（#stage）之上再叠 `comp.lyricsCanvas`（#lyrics）；只抓 #stage 会漏掉
+      // **整个歌词层与片尾字幕层**。症状就是用户报的那条：`?shot=211.0/211.3/…/211.9`
+      // 九张截图逐字节相同（269193B，全是黑场 + 一处暗残影），而正片里字幕明明在淡入
+      // （实测 .tmp/m211.0→211.6 三帧不同、字幕像素 0.47–0.51%；#lyrics 亮像素 0 → 9483 → 10099 → 10115）。
+      const dataUrl = await cdp.evaluate(`(() => {
+        const s = document.getElementById('stage')
+        const l = document.getElementById('lyrics')
+        const c = document.createElement('canvas')
+        c.width = s.width
+        c.height = s.height
+        const g = c.getContext('2d')
+        g.globalAlpha = 1
+        g.globalCompositeOperation = 'source-over'
+        g.drawImage(s, 0, 0, c.width, c.height)
+        if (l) g.drawImage(l, 0, 0, c.width, c.height)
+        return c.toDataURL('image/png')
+      })()`)
       const b64 = dataUrl.split(',')[1]
       const outPath = resolve(args.out)
       mkdirSync(dirname(outPath), { recursive: true })

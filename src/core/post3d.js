@@ -22,7 +22,7 @@ void main() {
 
 const FX_FRAG = `
 uniform sampler2D tDiffuse;
-uniform float uTime, uDispersion, uGlitch, uRadial, uVignette, uAberr, uScan, uExposure;
+uniform float uTime, uDispersion, uGlitch, uRadial, uVignette, uAberr, uScan, uExposure, uDouble;
 uniform vec2 uResolution;
 varying vec2 vUv;
 
@@ -68,6 +68,19 @@ void main() {
     col.b = texture2D(tDiffuse, uv - off).b;
     alpha = texture2D(tDiffuse, uv).a;
   }
+  // T44 / FIX_V5 §D 0:51：「青/洋红双重影」。
+  // 原文：「『眩晕』改为:…转速加快、相机 roll 加速、**青/洋红双重影**…要有色彩与层次」。
+  // 做法：把本帧画面按 ±偏移各采一次，一份染成青（压红）、一份染成洋红（压绿），
+  // 再与原色各半叠加 —— 屏幕上就是"同一画面戴着青/洋红的错位重影"。
+  // 注意：uDouble=0 时下面整段不执行，col 一个 bit 都不变（其它段落画面逐位不变）。
+  if (uDouble > 0.001) {
+    vec2 doff = vec2(0.012 * uDouble, 0.004 * uDouble);
+    vec3 cA = texture2D(tDiffuse, uv + doff).rgb;
+    vec3 cB = texture2D(tDiffuse, uv - doff).rgb;
+    vec3 dbl = cA * vec3(0.35, 1.0, 1.0) + cB * vec3(1.0, 0.35, 1.0);
+    col = mix(col, (col + dbl) * 0.5, uDouble);
+  }
+
   // 3D 是底层：输出不透明（清屏色本身不透明），否则下面的 DOM/2D 层会透出页面背景
 
   // 扫描线（极轻，CRT 味）
@@ -87,7 +100,13 @@ void main() {
 }
 `
 
-export async function createPost3D(renderer, scene, camera, { width, height, camera2 = null } = {}) {
+/**
+ * @param {{width:number, height:number, res?:number, camera2?:object}} o
+ *   `width/height` 是**逻辑**尺寸（1920×1080）；`res` 是 T55 的内部渲染倍率
+ *   （`?export=1&res=2` → 3D 后处理链也按 3840×2160 原生跑）。
+ *   `uResolution` 仍取逻辑尺寸：扫描线是按逻辑像素设计的，4K 下不该变成两倍密。
+ */
+export async function createPost3D(renderer, scene, camera, { width, height, res = 1, camera2 = null } = {}) {
   const out = {
     enabled: false,
     render: () => renderer.render(scene, camera),
@@ -126,21 +145,25 @@ export async function createPost3D(renderer, scene, camera, { width, height, cam
       uAberr: { value: 0 },
       uScan: { value: 0.25 },
       uExposure: { value: 1.0 },
+      uDouble: { value: 0 },
       uResolution: { value: new THREE.Vector2(width, height) },
     },
     vertexShader: FX_VERT,
     fragmentShader: FX_FRAG,
   }
 
-  const w = Math.max(2, Math.round(width * RES_SCALE))
-  const h = Math.max(2, Math.round(height * RES_SCALE))
+  // T55：合成链的目标缓冲按「逻辑尺寸 × res」建（res=1 时与以前完全一致）
+  const RW = Math.max(2, Math.round(width * res))
+  const RH = Math.max(2, Math.round(height * res))
+  const w = Math.max(2, Math.round(RW * RES_SCALE))
+  const h = Math.max(2, Math.round(RH * RES_SCALE))
   const target = new THREE.WebGLRenderTarget(w, h, {
     type: THREE.HalfFloatType,
     format: THREE.RGBAFormat,
     samples: 2,
   })
   const composer = new EffectComposer(renderer, target)
-  composer.setSize(width, height)
+  composer.setSize(RW, RH)
 
   const renderPass = new RenderPass(scene, camera)
   composer.addPass(renderPass)
@@ -177,6 +200,8 @@ export async function createPost3D(renderer, scene, camera, { width, height, cam
       u.uAberr.value = p.aberration ?? 0
       u.uScan.value = p.scan ?? 0.25
       u.uExposure.value = p.exposure ?? 1.0
+      // T44：青/洋红双重影包络（段 D 0:51；其它时刻 0）
+      u.uDouble.value = p.double ?? 0
       bloom.strength = p.bloom ?? 0.42
       bloom.radius = p.bloomRadius ?? 0.65
       composer.render()

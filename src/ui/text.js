@@ -677,6 +677,140 @@ export function ghostStats() {
   return { ghostFrames, ghostEvents }
 }
 
+/* ------------------------------------------------------------------ *
+ * G1（FIX_V5 §0）：「文字包围盒 ⊆ 所属面板包围盒（含 24px 内边距）」自检
+ * ------------------------------------------------------------------ *
+ * 为什么需要显式作用域（beginPanel/endPanel）而不是事后按坐标猜归属：
+ *   面板文字分两类画法 —— `text()` 与**裸 `g.fillText`**（F–N 段有 44 处）。
+ *   两类都已经会登记包围盒（见上面的补丁），但"这个盒子属于哪块面板"只有
+ *   **绘制那一刻**才知道（同一块画布上可能并排两块面板，坐标还可能被 DPR 缩放）。
+ *   所以面板在画自己之前 `beginPanel(rect, {pad:24})`、画完 `endPanel()`：
+ *   期间登记的所有盒子就是它的内容，一次性判定包含关系与最小内边距。
+ *
+ * 口径（与 §0 的 G1 一致，**没有放宽**）：
+ *   · outside —— 文字盒越出面板矩形（容差 0.5px）→ FAIL
+ *   · minPadPx < pad（默认 24）→ FAIL（"面板尺寸 = 内容 + 两侧 24px 内边距"）
+ * 结果累进 panelReports，供 ?probe=panels / ?selftest 读取。
+ */
+const panelStack = []
+let panelReports = []
+let panelFails = []
+
+/**
+ * 声明一块面板的矩形（**逻辑坐标**，与调用方的 fillText 同一坐标系）。
+ * 会把矩形按当前变换矩阵换算到设备坐标，与登记的文字盒同口径。
+ * @param {CanvasRenderingContext2D} g
+ * @param {{x:number,y:number,w:number,h:number}} rect
+ * @param {{pad?:number,id?:string,title?:string|null,note?:string}} [o]
+ */
+export function beginPanel(g, rect, o = {}) {
+  let m = null
+  try {
+    m = g.getTransform ? g.getTransform() : null
+  } catch (e) {
+    m = null
+  }
+  let dev
+  if (m) {
+    const xs = [rect.x, rect.x + rect.w, rect.x, rect.x + rect.w]
+    const ys = [rect.y, rect.y, rect.y + rect.h, rect.y + rect.h]
+    let x0 = Infinity
+    let y0 = Infinity
+    let x1 = -Infinity
+    let y1 = -Infinity
+    for (let i = 0; i < 4; i++) {
+      const px = xs[i] * m.a + ys[i] * m.c + m.e
+      const py = xs[i] * m.b + ys[i] * m.d + m.f
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+    }
+    const sc = Math.max(1e-6, Math.max(Math.abs(m.a), Math.abs(m.d)))
+    dev = { x: x0, y: y0, w: x1 - x0, h: y1 - y0, scale: sc }
+  } else {
+    dev = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, scale: 1 }
+  }
+  panelStack.push({
+    g,
+    id: o.id || 'panel',
+    title: o.title == null ? null : String(o.title),
+    note: o.note || '',
+    pad: o.pad == null ? 24 : +o.pad,
+    rect: { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+    dev,
+    startIdx: bboxes.length,
+  })
+}
+
+/** 结束最近一次 `beginPanel(g, …)`，就地判定包含关系 */
+export function endPanel(g) {
+  let sc = null
+  for (let i = panelStack.length - 1; i >= 0; i--) {
+    if (panelStack[i].g === g) {
+      sc = panelStack.splice(i, 1)[0]
+      break
+    }
+  }
+  if (!sc) return null
+  const pad = sc.pad * sc.dev.scale
+  const all = bboxes.slice(sc.startIdx).filter((b) => !b.ghost && !b.crosstalk && b.w > 0)
+  // 内层作用域（如标题栏）已经认领过的盒子：外层只查"是否落在面板内"，不再查内边距 ——
+  // 否则标题栏（chrome，自身 pad=0）会被窗口的 24px 内边距规则误判。
+  const mine = all.filter((b) => !b.__panelClaimed)
+  const outside = []
+  let minPad = Infinity
+  const gapOf = (b) =>
+    Math.min(b.x - sc.dev.x, b.y - sc.dev.y, sc.dev.x + sc.dev.w - (b.x + b.w), sc.dev.y + sc.dev.h - (b.y + b.h))
+  for (const b of all) {
+    const gap = gapOf(b)
+    if (gap < -0.5) {
+      outside.push({
+        t: b.text, x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h),
+        size: b.size, over: +(-gap).toFixed(1),
+      })
+    }
+  }
+  for (const b of mine) {
+    const gap = gapOf(b)
+    if (gap < minPad) minPad = gap
+  }
+  for (const b of all) b.__panelClaimed = true
+  const rec = {
+    id: sc.id,
+    title: sc.title,
+    note: sc.note,
+    space: inTextureSpace ? 'texture' : 'screen',
+    layer: inTextureSpace ? textureLayer(g) : g.__textLayer || 'unknown',
+    rect: {
+      x: Math.round(sc.rect.x), y: Math.round(sc.rect.y), w: Math.round(sc.rect.w), h: Math.round(sc.rect.h),
+    },
+    devRect: {
+      x: Math.round(sc.dev.x), y: Math.round(sc.dev.y), w: Math.round(sc.dev.w), h: Math.round(sc.dev.h),
+    },
+    pad: +sc.pad.toFixed(1),
+    boxes: all.length,
+    padBoxes: mine.length,
+    outside: outside.length,
+    outsideSample: outside.slice(0, 4),
+    minPadPx: mine.length && Number.isFinite(minPad) ? +minPad.toFixed(1) : null,
+  }
+  panelReports.push(rec)
+  if (outside.length || (rec.minPadPx != null && rec.minPadPx < rec.pad - 0.5)) panelFails.push(rec)
+  return rec
+}
+
+export function getPanelReports() {
+  return panelReports
+}
+export function getPanelFails() {
+  return panelFails
+}
+export function resetPanelReports() {
+  panelReports = []
+  panelFails = []
+}
+
 /** ?debug / ?selftest 用的违规摘要 */
 export function violationSummary() {
   if (!violations.length) return '无'

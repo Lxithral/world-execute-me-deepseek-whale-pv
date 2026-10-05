@@ -5,10 +5,23 @@
 //   · blind        改为"**光圈收缩**"（画面从边缘向中心收成窄缝，**只用暗角与光圈**，
 //                  不要遮挡立绘的黑条）—— 旧的上下黑条已彻底删除
 //   · dizzy        相机 roll 旋转 + 径向模糊 + 重影（roll 由 rig 关键帧给，径向模糊走 post3d）
+//                  ⚠️ T44 / FIX_V5 §D 0:51 改写：「『眩晕』改为:持久蜂群的字形粒子聚成旋涡
+//                  (漩涡中心是黑色深孔),转速加快、相机 roll 加速、青/洋红双重影;旋涡中心在
+//                  52.77 变成时间隧道入口(桥接)。要有色彩与层次,不要白色细线团。」
+//                  → 原来那 14 个白色细线环（dizzyRings）**已删除**；旋涡 = lib/swarm.js 的
+//                    layoutSwirl + SEGMENT_SWARM.D（49.2→52.7 形变）+ SPIN.D（自转加速）；
+//                    roll 加速 = core/rig.js 的 52.0 关键帧；青/洋红双重影 = core/post3d.js 的
+//                    uDouble（本文件按包络写进 `ctx.post`，main.js 转发）。
 //   · travel       全屏时间隧道；年份巨字高速飞过；修复"只有中间一小条"的 bug；
 //                  AD / BC 两词处数字符号翻转、流向反转；unite 处两股流在中心对撞合成一个亮点
-//   · deeply ×2    相机垂直下潜、水体光线渐暗、气泡流成线、抖动随下潜加剧；
-//                  深度计做成**画面中央的超大数字（≥150px）**而不是角落小条；结尾黑一拍
+//                  ⚠️ T44 / FIX_V5 §G8：年份数字改成**预渲染图集**（lib/digitAtlas.js），
+//                  每帧只改 uv、不再重画 canvas / 重传纹理。
+//   · deeply ×2    相机垂直下潜、水体光线渐暗、气泡流成线、抖动随下潜加剧；结尾黑一拍
+//                  ⚠️ T44 / FIX_V5 §D 0:57：深度数字 0→**10,935 m**（第二个 deeply 唱完到顶）、
+//                  改到 **2D 层右下**并加**右侧滚动刻度尺**（安全区可钉死），
+//                  画面随深度渐暗、加**零星生物荧光点**与**气泡上升线**；58.9 黑场。
+//                  旧版"画面中央的 3D 巨字"（depthLabel）已删除 —— 位置由世界坐标决定，
+//                  没法保证"右端不被裁切"。
 //   · §5.6 对应行：0:49.8–0:51.4「径向模糊是放射线近似」→ 改用 post3d 的**真径向模糊**
 //                  （沿屏幕中心多次采样），强度由 rms 驱动 —— 所以本段不再画任何放射线
 //
@@ -17,13 +30,16 @@
 //   · DC 混合 dcMix = smoothstep(...)；
 //   · 电平读数取**真实** sync.rmsAt(t)，不是假数字；
 //   · 时间尺从 2026 → 公元前 3000（步长 100 的刻度滚动）；
-//   · 下潜速度 = 0.35 + rms×1.6；深度读数 = pos × 11000 m。
+//   · 下潜速度 = 0.35 + rms×1.6（驱动气泡/水体的**视觉**速度）；
+//     深度**读数**按 FIX_V5 §D 0:57 改为"第一个 deeply 起唱 → 第二个 deeply 唱完"的单调斜坡，
+//     终点**恰好 10,935 m**（不再挂在视觉包络上）。
 
 import * as THREE from 'three'
 import { C, rgba } from '../core/palette.js'
 import { clamp, span, smoothstep, inOutCubic, outBack, TAU } from '../core/ease.js'
-import { text } from '../ui/text.js'
-import { textPlane, wireShape, glowTube, pxPerUnitAt, createLightRigSafe } from '../lib/scene3d.js'
+import { text, fontStack, checkSize } from '../ui/text.js'
+import { textPlane, wireShape, glowTube, createLightRigSafe } from '../lib/scene3d.js'
+import { digitAtlas, digitLabel } from '../lib/digitAtlas.js'
 import { codeWall } from '../lib/codewall.js'
 import { timeline } from './_seg.js'
 import { hash01 } from '../core/rng.js'
@@ -197,22 +213,14 @@ export default {
       this._chS = new THREE.Vector3(1, 1, 1)
     }
 
-    /* ============ ②c 眩晕：一串旋转的发光环（§7 段 D：dizzy 要"补主体"）============
-     * §7 段 D 原文：「dizzy:相机 roll 旋转 + 环形重影,并补主体:**一串旋转的发光环**」。
-     * 这也是 49–51s 那段"内容太少"的第二个主体（第一个是上面的电路环）。
-     * 实例化 14 个环，沿相机前方纵深排成一串、各自自转，给画面贡献大量硬边。
+    /* ============ ②c 眩晕：**已删除**（T44 / FIX_V5 §D 0:51）============
+     * 这里原本是"一串旋转的发光环"（`dizzyRings`，14 × TorusGeometry，白色细线）。
+     * FIX_V5 §D 原文把 0:51 的这一坨直接点名：「一大坨白色线条删除」「不要白色细线团」，
+     * 并要求眩晕改由**蜂群的字形粒子聚成旋涡**承担 —— 旋涡中心是黑色深孔、52.77 起接时间隧道。
+     * 所以眩晕的"主体"整体搬到了 lib/swarm.js（layoutSwirl / SEGMENT_SWARM.D / SPIN.D），
+     * 本文件只保留两件它管不了的事：后处理的双重影包络与相机 roll（rig.js）。
+     * 见 docs/REVIEW_T44.md 的"词→事件→对象"表。
      */
-    this.dizzyMat = new THREE.MeshBasicMaterial({ color: 0x9fd8ff, transparent: true, opacity: 0 })
-    this.dizzyRings = new THREE.InstancedMesh(new THREE.TorusGeometry(0.30, 0.010, 5, 28), this.dizzyMat, 14)
-    this.dizzyRings.name = 'dizzyRings'
-    this.dizzyRings.frustumCulled = false
-    this.dizzyRings.visible = false
-    this.grp.add(this.dizzyRings)
-    this._dzM = new THREE.Matrix4()
-    this._dzQ = new THREE.Quaternion()
-    this._dzE = new THREE.Euler()
-    this._dzP = new THREE.Vector3()
-    this._dzS = new THREE.Vector3(1, 1, 1)
 
     /* ============ ③ 时间隧道（本段专用，不套用 props/tunnel）============ */
     // 为什么不用 createProp('tunnel')：那个物件的"占满整屏"是靠一个 z=-span*0.52 的
@@ -236,11 +244,29 @@ export default {
     this.rings.visible = false
     this.grp.add(this.rings)
     this.yearLabels = []
+    // T44 / FIX_V5 §G8 原文：「环用 InstancedMesh,数字做成**预渲染图集**,不得每帧重绘文字纹理。」
+    // 旧实现是 12 块 `textPlane`：每帧 `setText()` 真的重画 canvas + `texture.needsUpdate`（12 次/帧），
+    // 0:52 那段"数字最多、环最多"的时刻帧率就是被它拖下去的。
+    // 现在：一张图集（2048×512，字形只画一次）+ 每块标签一块"逐字四边形"面片，每帧**只改 uv**。
+    // 字符集覆盖实际会用到的全部字形：`2026 AD` / `-3000 BC`（年份 ±1200 抖动，最多 8 字符）。
+    this.yearAtlas = digitAtlas('0123456789- ADBC', {
+      fontPx: 190,
+      weight: 700,
+      color: '#a9e6ff',
+      glow: 0.4,
+      cell: 256,
+      cols: 8,
+    })
     for (let i = 0; i < YEAR_LABELS; i++) {
-      const lbl = textPlane('2026 AD', { role: 'title', height: 0.3, family: 'code', color: '#a9e6ff', glow: 0.4 })
+      const lbl = digitLabel(this.yearAtlas, '2026 AD', {
+        slots: 9, // 定长：字符数变化时文字不跳动（居中生长）
+        height: 0.3, // 与旧 textPlane 同口径的世界字高
+        align: 'center',
+        name: `dTunnelYear#${i}`, // §G3：名字逐实例唯一
+      })
       lbl.mesh.visible = false
       this.grp.add(lbl.mesh)
-      this.yearLabels.push({ ...lbl, year: null })
+      this.yearLabels.push(lbl)
     }
     // 复用的临时量（避免每帧分配）
     // 复用临时向量（§8：渲染循环里不得分配新对象）
@@ -278,37 +304,63 @@ export default {
       this.streams.push({ mesh: m, sx })
     }
 
-    /* ============ ⑤ deeply：气泡流线 + 中央超大深度数字 ============ */
+    /* ============ ⑤ deeply：气泡上升线 + 生物荧光点（T44 / FIX_V5 §D 0:57）============
+     * 原文：「…画面随深度逐渐变暗,有**零星生物荧光点**、**气泡上升线**、屏幕抖动加剧…」
+     * 深度**数字**不在这里（旧版是 3D 巨字，已删除）—— 见 render ⑤：改到 2D 层右下 +
+     * 右侧滚动刻度尺，位置直接钉在 G5 安全区里。
+     */
     const NB = 200
+    this.bubCount = NB
     this.bubGeo = new THREE.BufferGeometry()
-    const bp = new Float32Array(NB * 3)
+    // 气泡 = **上升线**：每颗气泡两个顶点（同 x/z，y 相差一段长度），越深线越长。
+    const bp = new Float32Array(NB * 2 * 3)
     for (let i = 0; i < NB; i++) {
-      bp[i * 3] = ((i % 7) - 3) * 0.2
-      bp[i * 3 + 1] = (i / NB - 0.5) * 2.4
-      bp[i * 3 + 2] = ((i % 5) - 2) * 0.4
+      const x = ((i % 7) - 3) * 0.2
+      const y = (i / NB - 0.5) * 2.4
+      const z = ((i % 5) - 2) * 0.4
+      bp[i * 6] = x
+      bp[i * 6 + 1] = y
+      bp[i * 6 + 2] = z
+      bp[i * 6 + 3] = x
+      bp[i * 6 + 4] = y
+      bp[i * 6 + 5] = z
     }
     this.bubGeo.setAttribute('position', new THREE.BufferAttribute(bp, 3))
     this.bubGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 8)
-    this.bubMat = new THREE.PointsMaterial({
+    this.bubMat = new THREE.LineBasicMaterial({
       color: 0xbfe9ff,
-      size: 0.022,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+    this.bubbles = new THREE.LineSegments(this.bubGeo, this.bubMat)
+    this.bubbles.frustumCulled = false
+    this.bubbles.visible = false
+    this.grp.add(this.bubbles)
+
+    /* 零星生物荧光点：18 颗冷色柔光点，挂在一个"跟着相机"的小容器里（同水体），
+     * 于是它们始终贴在镜头前的纵深中缓慢漂移 —— 贴图一次性生成（G8 口径）。 */
+    const ND = 18
+    this.dotCount = ND
+    this.dotGeo = new THREE.BufferGeometry()
+    this.dotGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(ND * 3), 3))
+    this.dotGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 8)
+    this.glowSprite = glowDotTexture()
+    this.dotMat = new THREE.PointsMaterial({
+      map: this.glowSprite,
+      color: 0x9fffdc,
+      size: 0.06,
       transparent: true,
       opacity: 0,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       sizeAttenuation: true,
     })
-    this.bubbles = new THREE.Points(this.bubGeo, this.bubMat)
-    this.bubbles.frustumCulled = false
-    this.bubbles.visible = false
-    this.grp.add(this.bubbles)
-    // 深度数字：`setText()` 内部自带内容比对（key 不变就不重画贴图），
-    // 所以调用点**无条件**每帧调用即可 —— 不要再在外面加一层 `this._last*` 缓存，
-    // 那会把跨帧状态引入渲染路径（见使用处的说明）。
-    this.depthLabel = textPlane('0 m', { role: 'title', height: 0.34, family: 'code', color: '#bfe9ff', glow: 0.35 })
-    this.depthLabel.mesh.position.set(0, 0.02, 0.9)
-    this.depthLabel.mesh.visible = false
-    this.grp.add(this.depthLabel.mesh)
+    this.glowDots = new THREE.Points(this.dotGeo, this.dotMat)
+    this.glowDots.frustumCulled = false
+    this.glowDots.visible = false
+    this.grp.add(this.glowDots)
 
     /* ============ ⑥ 深海水体（贴在镜头前的渐暗层）============ */
     this.waterMat = new THREE.MeshBasicMaterial({ color: 0x04202f, transparent: true, opacity: 0, depthWrite: false })
@@ -496,28 +548,19 @@ export default {
       this.metrics.circuitDC = isDC
     }
 
-    /* ================= ②c 眩晕：一串旋转的发光环（§7 段 D）================= */
-    // 起得比 dizzy 词略早（1.2s）：§7 D 要求 47–51s"补主体"，而 49s 处紫外观测只剩边缘密度不足，
-    // 让这一串环提前淡入正好把那一秒补满。
-    const dzU = clamp(span(t, TL.dizzy1.t - 1.2, TL.dizzy1.t + 0.7)) * (1 - clamp(span(t, TL.travel.t - 1.3, TL.travel.t - 0.3)))
-    this.dizzyRings.visible = dzU > 0.01
-    if (dzU > 0.01) {
-      // 整串挂在相机前方并随相机朝向（local -z = 视线方向）
-      this.dizzyRings.position.copy(T.camera.position)
-      this.dizzyRings.quaternion.copy(T.camera.quaternion)
-      for (let i = 0; i < 14; i++) {
-        this._dzP.set(Math.sin(t * 0.7 + i * 0.55) * 0.32, Math.cos(t * 0.62 + i * 0.44) * 0.24, -0.35 - i * 0.34)
-        this._dzE.set(t * 0.55 + i * 0.31, t * 0.42 + i * 0.23, i * 0.44)
-        this._dzQ.setFromEuler(this._dzE)
-        const sc = 0.7 + 0.5 * Math.abs(Math.sin(i * 0.9 + t * 1.3))
-        this._dzS.set(sc, sc, sc)
-        this._dzM.compose(this._dzP, this._dzQ, this._dzS)
-        this.dizzyRings.setMatrixAt(i, this._dzM)
-      }
-      this.dizzyRings.instanceMatrix.needsUpdate = true
-      this.dizzyMat.opacity = 0.85 * dzU
-      this.metrics.dizzyU = dzU
-    }
+    /* ================= ②c 眩晕：青/洋红双重影（T44 / FIX_V5 §D 0:51）=================
+     * 眩晕的"主体"（旋涡）已经搬到 lib/swarm.js，本文件只负责原文里剩下的一件半：
+     *   · 「**青/洋红双重影**」：把本帧的后处理参数 `uDouble` 打开（shader 见 core/post3d.js）；
+     *   · 「旋涡中心在 52.77 变成时间隧道入口」：包络在 49.2 淡入、在 travel(52.77) 处收掉，
+     *     正好把"旋涡 → 隧道"的交接让给 ③ 的时间隧道。
+     * 注意这里**每帧无条件写** `ctx.post`（不写 0 也要写）：main.js 每帧先清空，场景不写
+     * 就等于"没有额外效果" —— 不留任何跨帧状态。
+     */
+    const dblU =
+      clamp(span(t, TL.dizzy1.t - 0.8, TL.dizzy1.t + 1.1)) *
+      (1 - clamp(span(t, TL.travel.t - 0.35, TL.travel.t + 0.35)))
+    ctx.post = { double: dblU }
+    this.metrics.doubleU = dblU
 
     /* ================= ③ 时间隧道（travel） ================= */
     const travU =
@@ -613,6 +656,12 @@ export default {
     const deep2 = clamp(span(t, TL.deeply2.start, TL.deeply2.t + 1.0))
     const deep = clamp(deep1 * 0.6 + deep2 * 0.6)
     const showDeep = deep > 0.01
+    // FIX_V5 §D 0:57：「深度数字从 0 数到 10,935 m,**在第二个 deeply 结束时到顶**」。
+    // 所以读数不再挂在视觉包络 `deep` 上（那是 ease 出来的、到不了顶也不会停在 10935），
+    // 而是挂在"第一个 deeply 起唱 → 第二个 deeply 唱完(+0.6s ≈ 58.89)"的单调斜坡上。
+    // 最后 0.6s：数字停在 10935 m，进黑场（58.9）。
+    const uDepth = clamp(span(t, TL.deeply1.start, TL.deeply2.t + 0.6))
+    const depthM = Math.round((10935 * uDepth) / 5) * 5
 
     /* ---- §7 段 D：「deeply(两次):相机垂直下潜,深度数字 ≥150px,**屏幕抖动随深度增强**」 ----
      * 全局的 `fx.shake(t)` 只按 `fx` 声明表给固定幅度、**不知道深度**，所以"随深度增强"
@@ -644,43 +693,76 @@ export default {
       this.water.quaternion.copy(T.camera.quaternion)
     }
     this.bubbles.visible = showDeep
+    this.glowDots.visible = showDeep
     if (showDeep) {
-      // 气泡流成线：越深点越大；速度由**真实** rms 驱动（迁移自旧文件 speed = 0.35 + rms*1.6）
+      // 气泡**上升线**：每颗气泡一条短线，越深越长越亮；
+      // 速度由**真实** rms 驱动（迁移自旧文件 speed = 0.35 + rms*1.6）
       const speed = 0.35 + sync.rmsAt(t) * 1.6
       const pos = this.bubGeo.attributes.position
-      for (let i = 0; i < pos.count; i++) {
-        const u = ((((i / pos.count) + t * speed * (0.35 + ((i * 37) % 100) / 140)) % 1) + 1) % 1
-        pos.setY(i, (-0.7 + u * 2.8) * (1 + 0.5 * deep))
-        pos.setX(i, ((((i * 53) % 100) / 100) - 0.5) * (4.4 - deep * 2.2))
+      const len = 0.05 + 0.3 * deep
+      for (let i = 0; i < this.bubCount; i++) {
+        const u = ((((i / this.bubCount) + t * speed * (0.35 + ((i * 37) % 100) / 140)) % 1) + 1) % 1
+        const y = (-0.7 + u * 2.8) * (1 + 0.5 * deep)
+        const x = ((((i * 53) % 100) / 100) - 0.5) * (4.4 - deep * 2.2)
+        const z = ((i % 5) - 2) * 0.4
+        pos.setXYZ(i * 2, x, y, z)
+        pos.setXYZ(i * 2 + 1, x, y + len, z)
       }
       pos.needsUpdate = true
       this.bubMat.opacity = 0.12 + 0.5 * deep
-      this.bubMat.size = 0.018 + 0.028 * deep
-      // 深度计：**画面中央的超大数字**（FIX §3 明确要求 ≥150px；旧版是角落小条）
-      const depthM = Math.round(clamp(deep * speed * 1.4) * 11000)
-      const step = Math.round(depthM / 50) * 50
-      // ⚠️ 这里曾经用 `if (step !== this._lastDepth)` 做"只在数字变化时重画"的省算。
-      // 那是个真 bug（FIX_V3 §0：渲染路径必须是 f(t) 的纯函数）：`this._lastDepth` 是
-      // **跨帧持久状态**，于是"这一帧画不画"取决于**上一帧渲染的是哪个 t**，
-      // 使同一 t 的输出依赖渲染历史（`?selftest` a) 的乱序比对正是在抓这一类）。
-      // 现在无条件调用 `setText()` —— 它内部自带内容比对（key 不变就不重画 canvas），
-      // 所以既保持了省算，又让结果只由 t 决定。
-      this.depthLabel.setText(`${step} m`)
-      this.depthLabel.mesh.visible = true
-      this.depthLabel.material.opacity = clamp(deep * 1.6)
-      this.depthLabel.mesh.position.set(0, 0.42 - deep * 0.55, 0.9)
-      this.metrics.depthPx = this.depthLabel.pxHeight(pxPerUnitAt(T.camera, 0.9, H))
+      // 生物荧光点：挂在跟随相机的容器里，随下潜向上掠过（我们"在往下掉"）
+      const dpos = this.dotGeo.attributes.position
+      for (let i = 0; i < this.dotCount; i++) {
+        const ph = hash01(i, 901) * TAU
+        dpos.setXYZ(
+          i,
+          (hash01(i, 902) - 0.5) * 3.0 + Math.sin(t * 0.25 + ph) * 0.22,
+          (hash01(i, 903) - 0.5) * 1.7 + Math.cos(t * 0.21 + ph) * 0.16 + uDepth * 0.8,
+          -0.3 - hash01(i, 904) * 2.0
+        )
+      }
+      dpos.needsUpdate = true
+      this.glowDots.position.set(T.camera.position.x, T.camera.position.y, T.camera.position.z - 0.9)
+      this.glowDots.quaternion.copy(T.camera.quaternion)
+      this.dotMat.opacity = 0.55 * uDepth
+
+      /* ---- 深度计（T44 / FIX_V5 §D 0:57）----
+       * 原文：「…数字完整位于安全区(靠右下,右端不被裁切);右侧加一把滚动刻度尺;
+       *        画面随深度逐渐变暗…」
+       * 改到 **2D 层**画：2D 层的坐标就是 1080p 逻辑像素，G5 的 x∈[5%,95%] / y∈[8%,80%]
+       * 能直接钉死，也会被 §2.8 的文字包围盒登记/自检抓到。
+       * （旧版是画面中央的 3D 巨字，位置由世界坐标 + 相机决定，"右端不被裁切"没法保证。）
+       */
+      const g = ctx.g
+      g.save()
+      g.fillStyle = `rgba(2,7,13,${(0.3 * uDepth).toFixed(3)})` // 「画面随深度逐渐变暗」
+      g.fillRect(0, 0, W, H)
+      g.restore()
+      // 数字：右端对齐到 95% 安全线内侧 6px（x1=1818/1920=94.7%）。
+      // 基线取 **74%** 而不是 78%：G5 用的是**登记包围盒**（`src/ui/globalrules.js:81-105`），
+      // 盒高 = px×1.16、盒顶 = 基线−0.78px → **盒底 = 基线+0.38px**；150px 时基线 78% 会让
+      // 盒底落到 83.2% ⇒ G5「bottom 3.2%」越界。74% 时盒底 = 799+57 = 856 ⇒ 79.3% ✓。
+      stageText(g, `${depthM} m`, W * 0.95 - 6, H * 0.74, {
+        role: 'title',
+        size: 150,
+        weight: 700,
+        color: '#bfe9ff',
+        align: 'right',
+        shadow: { color: 'rgba(90,200,255,0.45)', blur: 24 },
+      })
+      drawDepthRuler(g, W, H, depthM, uDepth)
+      this.metrics.depthPx = 150
       this.metrics.depthM = depthM
-    } else {
-      this.depthLabel.mesh.visible = false
     }
     /* ================= T17a / §1.5：blind 的「眼睑合拢」 ================= */
     // 上下两片**弧形眼睑**（平滑曲线边缘 + 柔和阴影 + 极细睫毛线）从上下合拢，
     // 留下一道**渐窄的发光缝**，最后全黑；`dizzy` 处晃动着睁开。**不画脸**。
     drawEyelids(ctx.g, ctx, t, TL)
 
-    // 结尾黑一拍（§3：deeply 结尾黑一拍再接副歌闪白）
-    const blackout = span(t, 58.62, 58.74) * (1 - span(t, 58.8, 58.98))
+    // 结尾黑一拍（T44 / FIX_V5 §D 0:57 原文：「58.9 黑一拍再进副歌闪白」）
+    // 段 D 最后一个可渲染的 t 是 59.0，所以黑场只能落在 58.90→59.00：黑到全黑的下一帧
+    // 正是段 E 的副歌（闪白），交接就在段界上完成。
+    const blackout = span(t, 58.9, 59.0)
     if (blackout > 0.01) {
       const g = ctx.g
       g.save()
@@ -737,9 +819,125 @@ export default {
 
   dispose() {
     if (this.scopeTag) this.scopeTag.dispose()
-    if (this.depthLabel) this.depthLabel.dispose()
+    // T44：3D 的 depthLabel（画面中央巨字）已删除 —— 深度数字改到 2D 层画。
+    // 年份数字改成「图集 + 面片」，所以除面片外还要回收图集纹理。
     for (const l of this.yearLabels || []) l.dispose()
+    if (this.yearAtlas) this.yearAtlas.dispose()
+    if (this.glowSprite) this.glowSprite.dispose()
+    if (this.bubGeo) this.bubGeo.dispose()
+    if (this.bubMat) this.bubMat.dispose()
+    if (this.dotGeo) this.dotGeo.dispose()
+    if (this.dotMat) this.dotMat.dispose()
   },
+}
+
+/* ================================================================== *
+ * T44 / FIX_V5 §D 0:57：深度计的"右侧滚动刻度尺" + 水下荧光点的柔光贴图
+ * ================================================================== */
+
+/**
+ * 柔光圆点贴图（一次性生成）。
+ * FIX_V5 §G8 的口径是"不得每帧重绘文字/图形纹理" —— 生物荧光点的柔光圆也一样：
+ * 画一次、当贴图复用，之后每帧只更新点的位置。
+ */
+function glowDotTexture(size = 64) {
+  const cv = document.createElement('canvas')
+  cv.width = size
+  cv.height = size
+  const g = cv.getContext('2d')
+  const r = size / 2
+  const grd = g.createRadialGradient(r, r, 0, r, r, r)
+  grd.addColorStop(0, 'rgba(255,255,255,1)')
+  grd.addColorStop(0.35, 'rgba(190,255,235,0.5)')
+  grd.addColorStop(1, 'rgba(120,220,200,0)')
+  g.fillStyle = grd
+  g.fillRect(0, 0, size, size)
+  const tex = new THREE.CanvasTexture(cv)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
+
+/**
+ * 2D 层文字（本段 0:57 的深度读数与刻度数字用它，**不用 `ui/text.js` 的 `text()`**）。
+ *
+ * 为什么（实测，别改回去）：`text()` 会先登记一个"声明 role"的包围盒，再调用 `g.fillText` ——
+ * 而这块 `#stage` 的 context 早被 `markScreenContext()` 打过补丁（`src/ui/text.js:413-445`），
+ * 于是**同一串字被登记两次**（一条 role='title'/'label'，一条 role='raw'，矩形完全相同、IoU=1）。
+ * 实测后果：`?probe=textscan` / 0.2s 全片扫描把段 D 报成 9 帧"文字重叠"
+ * （`A[raw]"4210 m" ∩ B[title]"4210 m"` IoU=1）—— 那是同一次 fillText 的自比，不是真的叠字。
+ *
+ * 全片其它 2D 舞台文字本来就是**裸 fillText**（如 `src/scenes/c_define.js:1014,1040,1060,1062`
+ * 的 `y = sin x` / `k = …` / `ε = …` / `lim f(x) = ∞`），只登记一次。这里对齐同一约定。
+ * 字号下限**没有放宽**：照样过 `checkSize(role, px, str)`（G1 / §2.5 的门槛）。
+ */
+function stageText(
+  g,
+  str,
+  x,
+  y,
+  { role = 'ui', size, weight = 600, color = '#e8eaee', align = 'left', baseline = 'alphabetic', alpha = 1, shadow = null } = {},
+) {
+  const px = size ?? 34
+  checkSize(role, px, str)
+  g.save()
+  g.globalAlpha *= alpha
+  g.font = `${weight} ${px}px ${fontStack('code')}`
+  g.textAlign = align
+  g.textBaseline = baseline
+  if (shadow) {
+    g.shadowColor = shadow.color || 'rgba(0,0,0,0.7)'
+    g.shadowBlur = shadow.blur ?? 8
+  }
+  g.fillStyle = color
+  g.fillText(String(str), x, y)
+  g.restore()
+}
+
+/**
+ * 右侧滚动刻度尺（FIX_V5 §D 0:57 原文：「右侧加一把滚动刻度尺」）。
+ *
+ * 只有落在 **G5 安全区**里的部分会画：尺身钉在 x=94.5%W，刻度向右 14/26px（≤95%W=1824），
+ * 长刻度的数字右对齐到 93%W（5 位数在 34px 等宽下 ≈100px 宽 → 左端 ≈88%W，都在安全区内）。
+ * 纵向只占 14%–60%H：下面留给 78% 基线的大数字，两者不会重叠。
+ * 刻度值以当前深度为原点向上下各铺 `spanM`（9000m ≈ 可视窗口），每 250m 一小格、每 1000m 一长格。
+ */
+function drawDepthRuler(g, W, H, depthM, uDepth) {
+  const x = W * 0.945
+  const yTop = H * 0.14
+  const yBot = H * 0.6
+  const pxPerM = (yBot - yTop) / 9000
+  const stepM = 250
+  const base = Math.round(depthM / stepM) * stepM
+  g.save()
+  g.globalAlpha = 0.85 * Math.min(1, uDepth * 1.6)
+  g.strokeStyle = 'rgba(160,225,255,0.7)'
+  g.lineWidth = 2
+  g.beginPath()
+  g.moveTo(x, yTop)
+  g.lineTo(x, yBot)
+  g.stroke()
+  const kN = Math.ceil(9000 / stepM) + 2
+  for (let k = -kN; k <= kN; k++) {
+    const v = base + k * stepM
+    if (v < 0 || v > 10935) continue // 海底就是 10935m，尺子不画到"不存在的深度"
+    const y = yBot - (v - depthM) * pxPerM
+    if (y < yTop - 1 || y > yBot + 1) continue
+    const major = v % 1000 === 0
+    g.lineWidth = major ? 3 : 1.5
+    g.beginPath()
+    g.moveTo(x, y)
+    g.lineTo(x + (major ? 26 : 14), y)
+    g.stroke()
+    if (major) {
+      stageText(g, `${v}`, W * 0.93, y + 12, {
+        role: 'label',
+        size: 34,
+        color: 'rgba(190,235,255,0.92)',
+        align: 'right',
+      })
+    }
+  }
+  g.restore()
 }
 
 /* ================================================================== *

@@ -24,7 +24,9 @@ import { buildImpulses, pulseAt, shockwaves } from './core/impact.js'
 import { ANCHORS } from './scenes/anchors.js'
 import { createLyrics, drawLyrics, englishAlpha } from './lyrics/render.js'
 import { ctxAt, tpsAt, statusAt, MONO } from './ui/dsh.js'
-import { setStrict as setTextStrict, listViolations, violationSummary, resetViolations, FONT, resetBBoxes, findTextOverlaps, resetGhostStats, ghostStats, markScreenContext, getBBoxes, textGuardDebug, getTextureReports, clearTextureReports } from './ui/text.js'
+import { setStrict as setTextStrict, listViolations, violationSummary, resetViolations, FONT, resetBBoxes, findTextOverlaps, resetGhostStats, ghostStats, markScreenContext, getBBoxes, textGuardDebug, getTextureReports, clearTextureReports, beginPanel, endPanel, getPanelReports, getPanelFails, resetPanelReports } from './ui/text.js'
+// T42（FIX_V5 §G2–G6、§G9）：全片全局规则的纯判据（selftest 与 ?probe=global 共用）
+import { cjkTexts, safeAreaViolations, duplicateSubjects, leverModels, sunStructures, alternationFrequency, ALT_FREQ_MAX } from './ui/globalrules.js'
 import { emojiReport } from './lib/emoji.js'
 import { createDomUI, uiVisibleAt, windowAt, CONFIG as DSH_CONFIG } from './ui/dom.js'
 import './ui/dsh.css'
@@ -78,6 +80,26 @@ function parseShot(v) {
 }
 const SHOT = params.has('shot') ? parseShot(params.get('shot')) : null
 const CONTACT = params.has('contact')
+/**
+ * ?export=1（FIX_V5 §1）：离线导出模式。
+ * 只是一组**只读**的环境约束，不改变任何画面逻辑（f(t) 一个字都不动）：
+ *   · DPR 固定 1.0、质量固定最高（不跑 DPR 看门狗、不设帧率上限）
+ *   · `preserveDrawingBuffer`（见 core/compositor.js 的白名单）
+ *   · 隐藏控制条、不加载音频（音频由 ffmpeg 在最后 `-c:a aac` 混流）
+ *   · 启动后先预热 60 帧（着色器编译）再 `await document.fonts.ready`
+ * 驱动方式：tools/export_mp4.mjs 经 CDP 调 window.__exportStart(…)，页面逐帧
+ * `toBlob('image/png')` 后 **POST** 给驱动起的本地 sink，由驱动管道送进 ffmpeg。
+ */
+const EXPORT = params.has('export')
+/**
+ * T55：**内部渲染倍率**（4K 交付用）。`?export=1&res=2` → 全部内部缓冲与 WebGL 缓冲
+ * 都按 1920·2 × 1080·2 = 3840×2160 原生渲染，布局仍按逻辑 1920×1080 坐标（见 compositor）。
+ * 默认 1 —— 交互路径、自检、探针的像素行为与加这个参数之前完全一致。
+ */
+const RENDER_RES = (() => {
+  const v = parseFloat(params.get('res') || '')
+  return Number.isFinite(v) && v > 0 ? Math.min(2, v) : 1
+})()
 /** 是否有演示段（?demo=…）在场：有则演示段独占画面（见 renderAt 的说明） */
 const demoMode = typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo')
 
@@ -159,6 +181,8 @@ function renderAt(t) {
   comp.clearLayers()
   // §2.8：每帧开始清空文字包围盒登记表（text() 会重新登记本帧的每一处文字）
   resetBBoxes()
+  // T41（FIX_V5 §G1）：面板审计作用域同样每帧清空（否则同一块面板会被逐帧重复报告）
+  resetPanelReports()
   ctx.t = t
   ctx.g = comp.layers.stageBack.g
   ctx.gFront = comp.layers.stageFront.g
@@ -217,6 +241,10 @@ function renderAt(t) {
   }
 
   const active = []
+  // T44 / FIX_V5 §D 0:51：场景可以在本帧把自己的**后处理参数**写进 `ctx.post`
+  // （段 D 的"青/洋红双重影"就靠它），main.js 在 renderThree 时读走。
+  // 每帧先清空：场景只在它活跃的时刻写，不写就是"没有额外效果"，不留跨帧状态。
+  ctx.post = null
   for (const s of SCENES) {
     if (t < s.start || t >= s.end) continue
     // 演示段（?demo=…）独占画面：否则同期的影片段落会抢镜（例如段 A 的开机屏会把 3D 挡住），
@@ -267,6 +295,9 @@ function renderAt(t) {
       bloomRadius: 0.6 + imp * 0.25,
       scan: 0.22,
       exposure: expo,
+      // T44 / FIX_V5 §D 0:51：「青/洋红双重影」——由**场景**给定的包络（段 D 49.2–53.1），
+      // 其它时刻为 0（shader 里 uDouble=0 是恒等变换）。见 core/post3d.js 的 uDouble。
+      double: ctx.post && ctx.post.double ? ctx.post.double : 0,
     })
   } catch (e) {
     reportError('three', e)
@@ -316,6 +347,7 @@ function renderAt(t) {
     dispersion: fx.dispersion(t),
     shake: fx.shake(t),
     crtLevel: fx.crt(t).level,
+    crtLine: fx.crt(t).line,
     layers: layerMask,
   }
   let vg = null
@@ -348,6 +380,29 @@ function renderAt(t) {
 }
 
 /**
+ * T52 / FIX_V5 §M 2:57「粉色爱心改为会跳动」：段 M 的蜂群爱心按「咚咚」两拍心跳缩放。
+ * 主拍 +12%、次拍 +6%，两拍都锁在**起音点**上：主拍与最近的起音点重合，
+ * 次拍落在主拍后 0.22 拍（拍长由 `sync.tempoAt(t)` 的 BPM 给出）。
+ * 只在段 M 返回 ≠1；其它段落恒 1 ⇒ 顶点输出与改动前逐位相同。
+ */
+function swarmBeatAt(t) {
+  const st = swarmStateAt(t)
+  if (st.seg !== 'M') return 1
+  const bpm = sync && sync.tempoAt ? sync.tempoAt(t) || 128 : 128
+  const per = 60 / Math.max(1, bpm)
+  let base = null
+  const ons = sync && sync.onsetsIn ? sync.onsetsIn(Math.max(0, t - 1.6), t) : []
+  if (ons && ons.length) {
+    // ⚠️ `onsetsIn()` 返回的是 `{t, s}` 对象数组（时间 + 强度），不是数字数组
+    const last = ons[ons.length - 1]
+    base = typeof last === 'number' ? last : last.t
+  }
+  const ph = base == null ? ((t / per) % 1 + 1) % 1 : (((t - base) / per) % 1 + 1) % 1
+  const hit = (x, at, w) => Math.exp(-((x - at) * (x - at)) / (2 * w * w))
+  return 1 + 0.12 * hit(ph, 0, 0.055) + 0.06 * hit(ph, 0.22, 0.055)
+}
+
+/**
  * 全片持久蜂群（FIX §2.1）。它是"连续主角"：整片一直在场，
  * 各段只给它下发**目标布局**，段内与段间都由带错峰的缓动形变完成。
  * 布局表在 src/lib/swarm.js 的 SEGMENT_SWARM + BRIDGES；3D 与 2D 两层共用同一份布局数组。
@@ -372,6 +427,8 @@ function applySwarm(t) {
   const charsOn = swarmCharsAt(t)
   // 3D 层：真实透视里的粒子（自检 n 的三角形数主要来源）
   swarm.object.visible = visible && charsOn
+  // T52 / §M 2:57：段 M 的粉色爱心心跳（其余段落恒 1）
+  const beat = swarmBeatAt(t)
   if (visible && charsOn) {
     swarm.update(t, {
       camera: comp.camera,
@@ -379,6 +436,10 @@ function applySwarm(t) {
       size: st.size,
       colorA: st.colorA,
       colorB: st.colorB,
+      // T44 / FIX_V5 §D 0:51：旋涡自转角（`SEGMENT_SWARM` 的 spin 开关 + SPIN 表；非段 D 恒 0）
+      spin: st.spin || 0,
+      // T52 / FIX_V5 §M 2:57：心跳缩放（其余段落恒 1）
+      beat,
       state: st,
     })
   }
@@ -413,6 +474,8 @@ function applySwarm(t) {
     u: +st.u.toFixed(3),
     bridge: st.bridge ? `${st.bridge.from}→${st.bridge.to}` : null,
     drawn: visible,
+    // T52 / §M 2:57：心跳缩放（探针用；其余段落恒 1）
+    beat: +beat.toFixed(3),
     p2: hadSwarm2d ? hadSwarm2d.drawn : 0,
   }
   return hadSwarm
@@ -479,30 +542,36 @@ function applyWhale(t) {
 function drawHud(g, t) {
   const pct = ctxAt(t)
   // 段 J 溢出：中央巨字（沿用 DIRECTOR 的 ≥200px 要求），到 100% 时更红更抖
-  // ⚠️ T12 / §1.9：窗口止于 **146.5**（黑场起点），不再到 147.9 ——
-  // 规格明写「2:26.5–2:27.9 的黑场里……**不要 % 数字、不要 context 字样、不要任何别的文字**」。
-  // 原来画到 147.9，于是黑场里混着 `100%` 与 `context`，与 §1.9 直接冲突。
-  if (t >= 129.0 && t < 146.5) {
+  // ⚠️ T12 / §1.9：窗口止于**黑场起点**（§J 2:27 已提前到 145.6），不再到 147.9 ——
+  // 规格明写「黑场里……**不要 % 数字、不要 context 字样、不要任何别的文字**」。
+  // T50 / §J 2:26：与大百分比同屏的 limit 窗内，百分比放到**垂直 38%**处，
+  // 字号收到 200px（§5.3 的下限），给「context」标签 + 64% 的提示文字留出
+  // ≥一行字高（74px）的净间距 ⇒ 巨字盒 / 标签盒 / 提示盒三者互不相交。
+  // ⚠️ 窗口 144.2 与 j_overflow.js 的 T_LIMIT_IN 同步（limit 屏的淡入起点）。
+  const inLimit = t >= 144.2 && t < 145.6
+  if (t >= 129.0 && t < 145.6) {
     // 注意：main.js 里 ease / rng 是命名空间导入，必须写 ease.clamp / rng.hash01。
     // 之前这里直接写 clamp(…) 会抛 ReferenceError，被 try/catch 吞掉，
     // 于是 §5.3 要求的"段 J 中央巨字"整段都没画出来。
     const hot = ease.clamp((pct - 20) / 80)
     const size = 120 + 150 * hot
     const jit = hot > 0.9 ? (rng.hash01(Math.floor(t * 24), 7) - 0.5) * 10 : 0
+    const pctSize = inLimit ? 200 : size
+    const pctY = H * (inLimit ? 0.38 : 0.44)
     g.save()
     g.translate(jit, 0)
-    g.font = `700 ${size}px ${FONT.sans}`
+    g.font = `700 ${pctSize}px ${FONT.sans}`
     g.textAlign = 'center'
     g.textBaseline = 'middle'
     g.fillStyle = hot > 0.75 ? rgba(C.red, 0.92) : rgba(C.amber, 0.9)
     g.shadowColor = hot > 0.75 ? rgba(C.red, 0.5) : 'rgba(0,0,0,0.6)'
     g.shadowBlur = 24
-    g.fillText(`${Math.round(pct)}%`, W / 2, H * 0.44)
+    g.fillText(`${Math.round(pct)}%`, W / 2, pctY)
     g.shadowBlur = 0
     // T12 / §1.8 J4：其下的小号 context 标签要求**字号 ≥40px**（原为 28px）。
     g.font = `600 40px ${FONT.sans}`
     g.fillStyle = rgba(C.fgDim, 0.85)
-    g.fillText('context', W / 2, H * 0.44 + size * 0.62)
+    g.fillText('context', W / 2, pctY + pctSize * (inLimit ? 0.82 : 0.62))
     g.restore()
   }
 }
@@ -688,7 +757,13 @@ async function boot() {
 
   const [pd, md, cd] = await Promise.all([loadPoints(), loadMesh(), loadContour()])
 
-  comp = new Compositor(canvas, document.getElementById('lyrics'))
+  // T55：导出模式默认 DPR 固定 1.0（像素尺寸确定）；`?res=2` 时把显示 DPR 与内部渲染倍率
+  // 一起提到 2 ⇒ view/歌词画布与内部合成链都是 3840×2160，且布局一个字不改。
+  const EXPORT_DPR = EXPORT ? RENDER_RES : null
+  comp = new Compositor(canvas, document.getElementById('lyrics'), {
+    dpr: EXPORT_DPR,
+    res: EXPORT ? RENDER_RES : 1,
+  })
   pointsLayer = createPointsLayer(pd)
   meshLayer = createMeshLayer(md)
   wireLayer = createWireLayer(cd, { weight: 2 })
@@ -791,10 +866,20 @@ async function boot() {
   // 刻意不再 glob ../assets/*.flac —— 那会把 84MB 的无损文件打进 dist（dist 目标 <15MB）。
   // public/audio/ 由 `npm run data` 从 assets/song.mp3 复制而来，且在 .gitignore 中。
   clock = new Clock()
-  await clock.init('./audio/song.mp3')
+  // ?export=1（FIX_V5 §1「不加载音频」）：导出只驱动 f(t)，音频在最后一步由 ffmpeg 混流。
+  // 不加载还有个实际好处：不必等 84MB 的 song.mp3 解码，也不会因为 headless 的音频策略失败。
+  if (!EXPORT) await clock.init('./audio/song.mp3')
 
   booted = true
-  window.__renderAt = (t) => renderAt(t)
+  window.__renderAt = (t) => {
+    const r = renderAt(t)
+    // ?export=1（FIX_V5 §1「在 GL 完成后返回」）：合成层要把 WebGL 画布 drawImage 进 2D 层，
+    // 但 GL 命令是异步的，逐帧取 PNG 时必须 `gl.finish()` 才能保证读到的是**这一帧**。
+    if (EXPORT && comp && comp.renderer) {
+      try { comp.renderer.getContext().finish() } catch (e) { /* 上下文丢失时忽略 */ }
+    }
+    return r
+  }
   window.__ctx = ctx
   window.__app = {
     comp, get clock() { return clock }, get lyrics() { return L }, sync, fx, SCENES, layerMask, errors,
@@ -929,14 +1014,58 @@ async function boot() {
     window.__textScanDone = false
     setTimeout(() => {
       const hits = []
+      // T41（FIX_V5 §G1）：同一次扫描顺带收「面板审计」——每块面板的文字包围盒是否全部落在
+      // 面板矩形内、且距四边 ≥ pad（默认 24px）。按 id 聚合，失败按 (id,原因) 去重并记首次出现时刻。
+      const panelAgg = new Map()
+      const failAgg = new Map()
       for (let tt = 0; tt < clock.duration; tt += step) {
         renderAt(tt)
+        for (const p of getPanelReports()) {
+          const key = `${p.id}@${p.space}/${p.layer}`
+          const cur = panelAgg.get(key)
+          if (!cur) {
+            panelAgg.set(key, {
+              id: p.id, title: p.title, space: p.space, layer: p.layer,
+              pad: p.pad, frames: 1, boxes: p.boxes,
+              minPadPx: p.minPadPx, outside: p.outside,
+              rect: p.rect, devRect: p.devRect,
+              tMin: +tt.toFixed(2), tMax: +tt.toFixed(2),
+            })
+          } else {
+            cur.frames++
+            cur.tMax = +tt.toFixed(2)
+            cur.boxes = Math.max(cur.boxes, p.boxes)
+            cur.outside = Math.max(cur.outside, p.outside)
+            if (p.minPadPx != null && (cur.minPadPx == null || p.minPadPx < cur.minPadPx)) cur.minPadPx = p.minPadPx
+          }
+        }
+        for (const f of getPanelFails()) {
+          const reason = f.outside ? 'outside' : 'pad'
+          const key = `${f.id}@${f.space}/${f.layer}|${reason}`
+          const cur = failAgg.get(key)
+          if (!cur) {
+            failAgg.set(key, {
+              id: f.id, title: f.title, space: f.space, layer: f.layer, reason,
+              pad: f.pad, first: +tt.toFixed(2), frames: 1,
+              minPadPx: f.minPadPx, outside: f.outside, sample: f.outsideSample,
+            })
+          } else {
+            cur.frames++
+            if (f.minPadPx != null && (cur.minPadPx == null || f.minPadPx < cur.minPadPx)) cur.minPadPx = f.minPadPx
+            if (f.outside > cur.outside) { cur.outside = f.outside; cur.sample = f.outsideSample }
+          }
+        }
         const rep = findTextOverlaps(0.1)
         if (rep.total) {
           hits.push({ t: +tt.toFixed(2), seg: (rendered || []).join('+'), total: rep.total, top: rep.overlaps[0] })
         }
       }
-      window.__textScanReport = { frames: Math.round(clock.duration / step), hits }
+      window.__textScanReport = {
+        frames: Math.round(clock.duration / step),
+        hits,
+        panels: [...panelAgg.values()],
+        panelFails: [...failAgg.values()],
+      }
       // 用一个**独立的布尔量**当完成标志：驱动端只需 `--wait-for "window.__textScanDone"`，
       // 不必去内省对象内部字段（那种写法在跨 CDP 求值时容易踩到代理/序列化的坑）。
       window.__textScanDone = true
@@ -947,6 +1076,56 @@ async function boot() {
             `A[${h.top.a.role}]"${h.top.a.t}"@(${h.top.a.x},${h.top.a.y}) ∩ B[${h.top.b.role}]"${h.top.b.t}"@(${h.top.b.x},${h.top.b.y})`
         )
       }
+      console.info(`[probe:panels] 全片出现面板 ${panelAgg.size} 块，失败的 ${failAgg.size} 组`)
+      for (const p of panelAgg.values()) {
+        console.info(
+          `  · ${p.id} [${p.space}/${p.layer}] ${p.frames} 帧 (${p.tMin}–${p.tMax}s) 盒 ${p.boxes} 个  ` +
+            `minPad=${p.minPadPx} 越界 ${p.outside}  矩形 ${p.rect.w}×${p.rect.h}`
+        )
+      }
+      for (const f of failAgg.values()) {
+        console.info(
+          `  ✗ ${f.id} [${f.space}/${f.layer}] ${f.reason} pad=${f.pad} minPad=${f.minPadPx} ` +
+            `越界 ${f.outside} 首现 ${f.first}s 共 ${f.frames} 帧  ${JSON.stringify((f.sample || []).slice(0, 2))}`
+        )
+      }
+    }, 0)
+    return
+  }
+
+  if (params.get('probe') === 'global') {
+    // T42：全局规则全片扫描（FIX_V5 §G2–G6、§G9）。和 ?probe=textscan 同样用 setTimeout 把
+    // 扫描推到下一轮事件循环，避免 boot() 内的同步渲染把驱动端的 CDP 轮询饿死。
+    const gap = parseFloat(params.get('gap') || '0.2')
+    const bgap = parseFloat(params.get('bgap') || String(1 / 30))
+    window.__probeFrame = () => null
+    window.__probeModules = () => JSON.stringify({ modules: [] })
+    window.__probeGlobal = () => JSON.stringify(window.__globalScanReport || { pending: true })
+    window.__globalScanDone = false
+    let lastLog = 0
+    setTimeout(async () => {
+      const t0 = performance.now()
+      const rep = await scanGlobalRules(gap, bgap, (i, n, phase) => {
+        const now = performance.now()
+        if (phase === 'rules' && now - lastLog > 10000) {
+          lastLog = now
+          console.info(`[probe:global] ${phase} ${i}/${n}（${((now - t0) / 1000).toFixed(1)}s）`)
+        }
+      })
+      const verdict = globalVerdict(rep)
+      window.__globalScanReport = {
+        ...rep,
+        seconds: +((performance.now() - t0) / 1000).toFixed(1),
+        verdict: Object.fromEntries(Object.entries(verdict).map(([k, v]) => [k, { ok: v.ok, detail: v.detail }])),
+      }
+      window.__globalScanDone = true
+      console.info(`[probe:global] 步长 ${gap}s（亮度 ${bgap.toFixed(4)}s），${rep.frames} 帧，用时 ${window.__globalScanReport.seconds}s`)
+      for (const [k, v] of Object.entries(verdict)) console.info(`  ${v.ok ? 'PASS' : 'FAIL'} ${k}  ${v.detail}`)
+      console.info(`[probe:global] 汉字分层 ${JSON.stringify(rep.cjkLayers)} / 安全区分层 ${JSON.stringify(rep.safeLayers)}`)
+      for (const d of rep.dup.slice(0, 12)) console.info(`  · 重名 ${d.name} ×${d.count} ${JSON.stringify(d.kinds)} ${d.tMin}–${d.tMax}s (${d.frames} 帧)`)
+      for (const l of rep.levers) console.info(`  · 拨杆 ${l.name} [${l.why}] ${JSON.stringify(l.geo || '')} ${l.tMin}–${l.tMax}s`)
+      for (const s of rep.suns) console.info(`  · 太阳 ${s.name} [${s.why}] ${JSON.stringify(s.geo || '')} ${s.tMin}–${s.tMax}s`)
+      console.info(`  · G6 亮度 ${JSON.stringify(rep.alt)}`)
     }, 0)
     return
   }
@@ -1006,6 +1185,13 @@ async function boot() {
       document.body.appendChild(img)
     }
     console.info(`[shot] 定格 t=${SHOT.toFixed(3)}s`)
+    return
+  }
+
+  // ?export=1（FIX_V5 §1）：离线导出。不建控制条、不启动 rAF 循环，只等 CDP 侧驱动
+  // （tools/export_mp4.mjs）调 window.__exportStart(…)。预热与字体就绪都在 startExportMode 里。
+  if (EXPORT) {
+    await startExportMode()
     return
   }
 
@@ -1182,6 +1368,203 @@ function loop(now) {
     (wireLayer && wireLayer.object.visible ? wireLayer.segCount : 0) +
     comp.stage3d.children.length * 100
   updateReadout(t)
+}
+
+/* ================================================================== *
+ * T40（FIX_V5 §1）：离线导出 MP4 —— 页面侧驱动接口
+ * ------------------------------------------------------------------
+ * 画面路径**完全复用** `renderAt(t)`（f(t) 的纯函数），这里只做三件事：
+ *   ① 预热 60 帧 + `await document.fonts.ready`：把着色器编译/字体加载从逐帧计时里剔掉；
+ *   ② 逐帧把「最终合成画布（#stage，已过后处理）+ 歌词/字幕层（#lyrics）」叠进一张
+ *      1920×1080 缓冲 —— 歌词画在独立顶层画布上，只取 #stage 会丢掉歌词；
+ *   ③ `toBlob('image/png')` 后 **POST** 给驱动（tools/export_mp4.mjs）起的本地 sink，
+ *      由驱动管道送进 ffmpeg。不用 CDP 传大字符串（每帧 1–3MB base64 会成为瓶颈），
+ *      帧序由 `await fetch` 天然保证。
+ * `--mb N` 的运动模糊也在这里做：同一帧内取 N 个子帧（快门 180°）求平均。
+ * ================================================================== */
+async function startExportMode() {
+  renderPaused = true // 本模式绝不启动 rAF 循环，一切由 __exportStart 驱动
+  const WARMUP = 60
+  for (let i = 0; i < WARMUP; i++) window.__renderAt(0)
+  await document.fonts.ready
+
+  // T55：导出帧缓冲 = **画布实际像素尺寸**（`?res=2` 时 3840×2160；res=1 时仍是 1920×1080）
+  const CW = comp.view.width
+  const CH = comp.view.height
+  /** 单帧合成缓冲：舞台（后处理后的最终画面）+ 歌词层 */
+  const frameCv = document.createElement('canvas')
+  frameCv.width = CW
+  frameCv.height = CH
+  const fg = frameCv.getContext('2d')
+  /** 运动模糊（--mb N）的累加缓冲 */
+  const accCv = document.createElement('canvas')
+  accCv.width = CW
+  accCv.height = CH
+  const ag = accCv.getContext('2d')
+
+  const drawOne = (t) => {
+    window.__renderAt(t)
+    fg.setTransform(1, 0, 0, 1, 0, 0)
+    fg.globalAlpha = 1
+    fg.globalCompositeOperation = 'source-over'
+    fg.clearRect(0, 0, CW, CH)
+    // 显式给目标尺寸：DPR 覆盖为 1 时两张画布本来就是 1920×1080，但不依赖这一点
+    fg.drawImage(comp.view, 0, 0, CW, CH)
+    if (comp.lyricsCanvas) fg.drawImage(comp.lyricsCanvas, 0, 0, CW, CH)
+  }
+
+  /** 渲染第 base 帧（含运动模糊），返回要编码的画布 */
+  const renderFrame = (base, fps, mb) => {
+    if (mb <= 1) {
+      drawOne(base)
+      return frameCv
+    }
+    ag.setTransform(1, 0, 0, 1, 0, 0)
+    ag.globalAlpha = 1
+    ag.globalCompositeOperation = 'source-over'
+    ag.clearRect(0, 0, CW, CH)
+    for (let k = 0; k < mb; k++) {
+      // 快门 180°：N 个子帧均匀铺在 [t, t+1/fps)，各取中点
+      drawOne(base + ((k + 0.5) / mb) / fps)
+      // 累计平均：avg_k = k/(k+1)·avg_{k-1} + 1/(k+1)·新帧（画面不透明，source-over 即混合）
+      ag.globalAlpha = 1 / (k + 1)
+      ag.drawImage(frameCv, 0, 0)
+    }
+    ag.globalAlpha = 1
+    return accCv
+  }
+
+  /**
+   * 帧编码（T55）：`png` 无损，但 4K（3840×2160）下 Chromium 内建 PNG 编码实测 **6–11s/帧**
+   * （整条导出链的唯一瓶颈，见 out/t55/probe4k_res2.log）；`jpeg` q=quality 实测 **0.38s/帧**、
+   * 1.8MB/帧，与 PNG 的 PSNR **54.1dB**（视觉无损）⇒ 配合 `export_mp4.mjs --frames jpeg`
+   * 的 `-vcodec mjpeg` 管道使用。
+   */
+  const toFrame = (cv, kind, quality) =>
+    new Promise((res, rej) =>
+      cv.toBlob(
+        (b) => (b ? res(b) : rej(new Error('toBlob 返回 null'))),
+        kind === 'jpeg' ? 'image/jpeg' : 'image/png',
+        kind === 'jpeg' ? quality : undefined,
+      ),
+    )
+
+  const progress = (window.__exportProgress = {
+    running: false,
+    done: false,
+    error: null,
+    i: 0,
+    total: 0,
+    skipped: 0,
+    renderMs: [],
+    encodeMs: [],
+    postMs: [],
+    frameMs: [],
+    meanMs: null,
+    etaSec: null,
+    bytes: 0,
+  })
+
+  window.__exportInfo = {
+    w: CW,
+    h: CH,
+    duration: clock.duration,
+    syncOffset: clock.offset,
+    dpr: comp.dpr,
+    renderer: (() => {
+      try {
+        const gl = comp.renderer.getContext()
+        const d = gl.getExtension('WEBGL_debug_renderer_info')
+        return d ? String(gl.getParameter(d.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER))
+      } catch (e) {
+        return 'unknown'
+      }
+    })(),
+    preserveDrawingBuffer: comp.preserveDrawingBuffer,
+    warmup: WARMUP,
+    ready: true,
+  }
+
+  /**
+   * @param {{from:number,to:number,fps:number,mb:number,url:string,offset?:number,skip?:number[][],
+   *          frame?:'png'|'jpeg', quality?:number}} o
+   *   skip = [[i0,i1), …] 要跳过的帧下标（断点续做：已编码好的块不再重渲）
+   *   frame/quality = 帧编码格式（T55；默认 png，4K 长片用 jpeg q0.98）
+   */
+  window.__exportStart = (o) => {
+    runExport(o).catch((e) => {
+      progress.error = String((e && e.message) || e)
+      progress.running = false
+    })
+    return true
+  }
+
+  const runExport = async (o) => {
+    const mb = o.mb || 1
+    const from = o.from
+    const to = o.to
+    const fps = o.fps
+    const offset = o.offset || 0
+    const skip = o.skip || []
+    const url = o.url
+    const frame = o.frame === 'jpeg' ? 'jpeg' : 'png'
+    const quality = Number.isFinite(o.quality) && o.quality > 0 && o.quality <= 1 ? o.quality : 0.98
+    const total = Math.max(0, Math.round((to - from) * fps))
+    progress.running = true
+    progress.done = false
+    progress.error = null
+    progress.i = 0
+    progress.total = total
+    progress.skipped = 0
+    progress.renderMs = []
+    progress.encodeMs = []
+    progress.postMs = []
+    progress.frameMs = []
+    progress.meanMs = null
+    progress.etaSec = null
+    progress.bytes = 0
+    progress.frame = frame
+    progress.quality = quality
+    const inSkip = (i) => skip.some((r) => i >= r[0] && i < r[1])
+    const t0 = performance.now()
+    try {
+      for (let i = 0; i < total; i++) {
+        if (inSkip(i)) {
+          progress.i = i + 1
+          progress.skipped++
+          continue
+        }
+        const t = from + i / fps + offset
+        const f0 = performance.now()
+        const out = renderFrame(t, fps, mb)
+        const f1 = performance.now()
+        const blob = await toFrame(out, frame, quality)
+        const f2 = performance.now()
+        // text/plain 是 CORS 安全列出的类型 → 不触发预检（body 仍是图像字节流）
+        const res = await fetch(`${url}?i=${i}&t=${t.toFixed(6)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: blob,
+        })
+        if (!res.ok) throw new Error(`POST 第 ${i} 帧失败：HTTP ${res.status}`)
+        const f3 = performance.now()
+        // 全量留存每帧耗时（211.9s@60fps 也只有 ~1.3 万个数字）：分位数不能用滑动窗口算
+        progress.renderMs.push(+(f1 - f0).toFixed(2))
+        progress.encodeMs.push(+(f2 - f1).toFixed(2))
+        progress.postMs.push(+(f3 - f2).toFixed(2))
+        progress.frameMs.push(+(f3 - f0).toFixed(2))
+        progress.i = i + 1
+        progress.bytes += blob.size
+        const done = i + 1 - progress.skipped
+        const elapsed = (performance.now() - t0) / 1000
+        progress.meanMs = +((elapsed / Math.max(1, done)) * 1000).toFixed(2)
+        progress.etaSec = +((total - i - 1) * (elapsed / Math.max(1, done))).toFixed(1)
+      }
+      progress.done = true
+    } finally {
+      progress.running = false
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -1518,6 +1901,12 @@ const scanCtx = scanCv.getContext('2d', { willReadFrequently: true })
  *   ② 结尾那段注释写的是「CRT 关机后的黑」，但 DIRECTOR 的 CRT 关机是 **3:29 = 209.0**，
  *      §7 段 N 也明写「CRT **关机的第一帧起**清空所有图层」；旧值 209.6 比它晚了 0.6s，
  *      白白把一段"按规格必须全清"的帧算进不达标。改为与 DIRECTOR 对齐。
+ *   ③ T55 终验实测：段 J **黑场的左沿**与本表不一致 —— 表里留的还是旧黑场 146.5 的登记值 146.45，
+ *      而 T50 已按 §J 2:27「黑场自 2:25.6 起」把黑场提前到 145.6，同源的
+ *      `src/core/exposure.js` 的 `EXEMPT_WINDOWS`（见该文件 `{ from: 145.6, to: 147.95, … }`）
+ *      也同步前移到了 145.6，且那边注明「右沿与判据一字未动」。这 0.85s 的错位让 146.0s 那一帧
+ *      （黑场起后正在逐字键入红字，实测 0.9% 非众数 / 0.16% 边缘）被判成密度不达标，
+ *      而它与本表已经豁免的 146.5s / 147.5s 是同一类帧。这里只把左沿对齐到 145.6。
  *
  * **边缘门槛（≥4%）与器乐门槛（≥25%）一字未动。** 这一处只让 b) 不去惩罚
  * 规格要求它必须是纯白/纯黑的那些帧 —— 与 §6 的口径一致。若你不同意这条对账，
@@ -1527,7 +1916,7 @@ const EXEMPT = [
   [0.0, 0.85], // 段 A 的 CRT 开机亮线（DIRECTOR 有意）
   [48.4, 51.6], // 段 D 眼睑合拢→全黑→睁眼（§1.5「最后全黑」；T17a 已验证）——T19c 按实测登记，与 EXPOSURE_WINDOWS 同源
   [69.40, 69.72], // 段 E 巨大 ▶ 的闪白（T19b：按词锚点 execution=69.41 对齐；旧值 68.4–68.9 早 1s，与 EXPOSURE_WINDOWS 同源）
-  [146.45, 147.95], // 段 J 2:26.5 黑场 + 红字
+  [145.6, 147.95], // 段 J 黑场 + 红字（T55：左沿与同源 exposure.js EXEMPT_WINDOWS 对齐到 145.6，理由见上 ③；右沿与门槛未动）
   [161.8, 162.2], // 段 K 12/12 白场
   [205.9, 206.5], // 段 N 3:25.96 定格闪白
   [209.0, 211.907], // 段 N 3:29 CRT 关机（§7：关机第一帧起清空所有图层）→ 片尾黑场字幕
@@ -1672,6 +2061,173 @@ async function scanFilm(stride, onProgress) {
     } else if (i % 8 === 7) await yieldTick()
   }
   return out
+}
+
+/**
+ * 当前这一帧的整屏平均亮度（0–1）。与 scanFilm 共用同一张 480×270 离屏画布与同一条合成路径
+ * （`canvas` = 最终合成、`comp.lyricsCanvas` = 歌词层），所以 G6 的数字与既有亮度自检同源。
+ */
+function frameLuma() {
+  scanCtx.setTransform(1, 0, 0, 1, 0, 0)
+  scanCtx.clearRect(0, 0, SCAN_W, SCAN_H)
+  scanCtx.drawImage(canvas, 0, 0, SCAN_W, SCAN_H)
+  if (comp && comp.lyricsCanvas) scanCtx.drawImage(comp.lyricsCanvas, 0, 0, SCAN_W, SCAN_H)
+  const d = scanCtx.getImageData(0, 0, SCAN_W, SCAN_H).data
+  let s = 0
+  for (let k = 0; k < d.length; k += 4) s += 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2]
+  return s / (d.length / 4) / 255
+}
+
+/**
+ * T42（FIX_V5 §G2–G6、§G9）：全片全局规则扫描。
+ *
+ * 为什么合成一次扫描：这六条都是「全片级」的，分开跑会把同一条 1060 帧的渲染循环重复六遍。
+ *   · 0.2s 采样同时收 G2（汉字）/G3（重名主体）/G4（拨杆）/G5（安全区）/G9（太阳结构）；
+ *   · G6（亮度交替 ≤2.5Hz）**另跑 1/30s 稠密亮度序列**——2.5Hz 的上限至少要 >5Hz 采样才不混叠，
+ *     0.2s（5Hz）刚好踩在奈奎斯特边界上，会漏判 8Hz 那种交替（段 G 的配色切换实测就是 8Hz）。
+ *
+ * 结果缓存，`?selftest` 的 g2…g9 项与 `?probe=global` 共用，避免同一轮里跑两遍。
+ * 只读：不改任何画面状态（renderAt 只按 t 求值）。
+ */
+let _globalReport = null
+async function scanGlobalRules(gap = 0.2, bgap = 1 / 30, onProgress) {
+  if (_globalReport && _globalReport.gap === gap && _globalReport.bgap === bgap) return _globalReport
+  const stage = ctx.three && ctx.three.stage3d
+  const W = canvas.width
+  const H = canvas.height
+  const cjk = []
+  const safe = []
+  const cjkLayers = {}
+  const safeLayers = {}
+  const dupAgg = new Map()
+  const leverAgg = new Map()
+  const sunAgg = new Map()
+  const merge = (map, key, item, t) => {
+    const cur = map.get(key)
+    if (!cur) map.set(key, { ...item, key, frames: 1, tMin: +t.toFixed(2), tMax: +t.toFixed(2) })
+    else {
+      cur.frames++
+      cur.tMax = +t.toFixed(2)
+    }
+  }
+  let frames = 0
+  const total = Math.max(1, Math.round(clock.duration / gap))
+  for (let t = 0; t <= clock.duration - 0.05; t += gap) {
+    renderAt(t)
+    frames++
+    const seg = (rendered || []).join('+')
+    const boxes = getBBoxes()
+    for (const b of cjkTexts(boxes)) {
+      cjkLayers[b.layer] = (cjkLayers[b.layer] || 0) + 1
+      if (cjk.length < 60) cjk.push({ t: +t.toFixed(2), seg, layer: b.layer, role: b.role, text: b.text })
+    }
+    for (const v of safeAreaViolations(boxes, W, H, { skipLayers: ['lyrics'] })) {
+      safeLayers[v.layer] = (safeLayers[v.layer] || 0) + 1
+      if (safe.length < 60) safe.push({ t: +t.toFixed(2), seg, ...v })
+    }
+    if (stage) {
+      for (const d of duplicateSubjects(stage)) merge(dupAgg, d.name, d, t)
+      for (const l of leverModels(stage)) merge(leverAgg, `${l.name}|${l.why}`, l, t)
+      for (const s of sunStructures(stage)) merge(sunAgg, `${s.name}|${s.why}`, s, t)
+    }
+    if (frames % 50 === 0) {
+      if (onProgress) onProgress(frames, total, 'rules')
+      await yieldTick()
+    }
+  }
+  if (onProgress) onProgress(total, total, 'rules')
+  // G6：1/30s 稠密亮度序列（全片）
+  const series = []
+  const dn = Math.max(2, Math.round(clock.duration / bgap))
+  for (let i = 0; i < dn; i++) {
+    renderAt(i * bgap)
+    series.push(frameLuma())
+    if (i % 120 === 0) {
+      if (onProgress) onProgress(i, dn, 'lum')
+      await yieldTick()
+    }
+  }
+  const alt = alternationFrequency(series, bgap)
+  // 找最坏 2s 窗口的起止时刻（报告里定位用）
+  let wLo = 0
+  let best = -1
+  const w = Math.max(4, Math.round(2 / bgap))
+  for (let i = 0; i + w <= series.length; i++) {
+    let s = 0
+    for (let j = i; j < i + w; j++) s += series[j]
+    const swing = Math.max(...series.slice(i, i + w)) - Math.min(...series.slice(i, i + w))
+    const score = swing
+    if (score > best) {
+      best = score
+      wLo = i
+    }
+    void s
+  }
+  const rep = {
+    gap,
+    bgap,
+    frames,
+    W,
+    H,
+    cjk,
+    cjkLayers,
+    safe,
+    safeLayers,
+    dup: [...dupAgg.values()].sort((a, b) => b.frames - a.frames),
+    levers: [...leverAgg.values()],
+    suns: [...sunAgg.values()],
+    alt: { ...alt, worstWindow: [+(wLo * bgap).toFixed(2), +(wLo * bgap + 2).toFixed(2)] },
+  }
+  _globalReport = rep
+  return rep
+}
+
+/**
+ * 把 `scanGlobalRules` 的报告折算成六条规则的判定。
+ * selftest 的 g2…g9 项与 `?probe=global` 共用这一份阈值，避免出现「探针绿、自检红」。
+ */
+function globalVerdict(rep) {
+  const alt = rep.alt
+  // G6 只看**幅度够大**的交替：整屏亮度峰谷差 < 2% 的抖动是粒子闪烁，不是光敏风险。
+  const g6bad = alt.maxF > ALT_FREQ_MAX && alt.maxSwing >= 0.02
+  const brief = (arr, f, n = 3) => arr.slice(0, n).map(f).join(' | ')
+  return {
+    g2: {
+      ok: rep.cjk.length === 0,
+      detail: rep.cjk.length
+        ? `${rep.cjk.length} 处非歌词汉字：${brief(rep.cjk, (b) => `${b.t}s[${b.layer}]"${b.text}"`)}`
+        : '全片除歌词层外无汉字',
+    },
+    g3: {
+      ok: rep.dup.length === 0,
+      detail: rep.dup.length
+        ? `${rep.dup.length} 个重名主体：${brief(rep.dup, (d) => `${d.name}×${d.count}(${d.tMin}–${d.tMax}s)`)}`
+        : '任一帧都没有重名主体',
+    },
+    g4: {
+      ok: rep.levers.length === 0,
+      detail: rep.levers.length
+        ? `${rep.levers.length} 个拨杆/摇杆：${brief(rep.levers, (l) => `${l.name}[${l.why}](${l.tMin}–${l.tMax}s)`)}`
+        : '无拨杆/摇杆模型',
+    },
+    g5: {
+      // 说明：`rep.safe` 只留前 60 条明细，真实量级看 `rep.safeLayers` 的帧次合计。
+      ok: rep.safe.length === 0,
+      detail: rep.safe.length
+        ? `${Object.values(rep.safeLayers).reduce((a, n) => a + n, 0)} 帧次越出安全区（已排除歌词层；前 3 条：${brief(rep.safe, (s) => `${s.t}s[${s.layer}]"${s.text}" ${s.over.join(',')}`)}）`
+        : `舞台文字（除歌词层）x∈[5%,95%]、y∈[8%,80%] 全片成立（${rep.W}×${rep.H}）`,
+    },
+    g6: {
+      ok: !g6bad,
+      detail: `最强 2s 窗口交替 ${alt.maxF}Hz（上限 ${ALT_FREQ_MAX}Hz，摆幅 ${alt.maxSwing}）；全片均 ${alt.f}Hz、总摆幅 ${alt.swing}、最坏窗口 ${alt.worstWindow && alt.worstWindow.join('–')}s`,
+    },
+    g9: {
+      ok: rep.suns.length === 0,
+      detail: rep.suns.length
+        ? `${rep.suns.length} 个太阳结构：${brief(rep.suns, (s) => `${s.name}[${s.why}](${s.tMin}–${s.tMax}s)`)}`
+        : '无太阳结构（名字与「圆盘+放射线」结构都没有）',
+    },
+  }
 }
 
 async function runSelftest() {
@@ -2101,6 +2657,206 @@ async function runSelftest() {
     )
   } catch (e) {
     await say('r 文字重叠', false, String(e && e.message))
+  }
+  await yieldNow()
+
+  // ---- r2) 面板包含（T41 / FIX_V5 §G1）：任何文字包围盒必须落在其所属面板包围盒内，
+  //      且距四边 ≥ 面板声明的内边距（默认 24px）。「文字比窗口大」= FAIL。
+  try {
+    const bad = []
+    const seen = new Map()
+    let frames = 0
+    for (let t = 0; t <= clock.duration - 0.05; t += 0.5) {
+      renderAt(t)
+      frames++
+      for (const p of getPanelReports()) {
+        const key = `${p.id}@${p.space}/${p.layer}`
+        const cur = seen.get(key)
+        if (!cur) seen.set(key, { id: key, frames: 1, boxes: p.boxes, minPadPx: p.minPadPx, outside: p.outside, pad: p.pad })
+        else {
+          cur.frames++
+          cur.boxes = Math.max(cur.boxes, p.boxes)
+          cur.outside = Math.max(cur.outside, p.outside)
+          if (p.minPadPx != null && (cur.minPadPx == null || p.minPadPx < cur.minPadPx)) cur.minPadPx = p.minPadPx
+        }
+      }
+      for (const f of getPanelFails()) {
+        if (bad.length < 40) {
+          bad.push(
+            `t=${t.toFixed(1)}s ${f.id}[${f.space}/${f.layer}] ${f.outside ? `越界 ${f.outside} 处` : `minPad=${f.minPadPx}<${f.pad}`}` +
+              (f.outsideSample && f.outsideSample.length
+                ? ` 例："${f.outsideSample[0].t}"@(${f.outsideSample[0].x},${f.outsideSample[0].y}) 超出 ${f.outsideSample[0].over}px`
+                : '')
+          )
+        }
+      }
+      if (frames % 60 === 0) await yieldNow()
+    }
+    const panelList = [...seen.values()]
+    const failPanels = panelList.filter((p) => p.outside || (p.minPadPx != null && p.minPadPx < p.pad - 0.5))
+    await say(
+      'r2 面板包含',
+      bad.length === 0,
+      bad.length
+        ? `${bad.length} 个采样帧有面板越界：${bad.slice(0, 4).join(' | ')}`
+        : `${frames} 帧（每 0.5s）共 ${panelList.length} 块面板：文字盒全部落在面板内且内边距 ≥ 声明值（最小 ${Math.min(...panelList.map((p) => (p.minPadPx == null ? Infinity : p.minPadPx))).toFixed(1)}px）` +
+            (failPanels.length ? ` ← ${failPanels.length} 块有问题` : '')
+    )
+  } catch (e) {
+    await say('r2 面板包含', false, String(e && e.message))
+  }
+  await yieldNow()
+
+  // ---- T42) 全局规则（FIX_V5 §G2–G6、§G9）----
+  // 六条规则共用**一次**全片扫描：0.2s 采样收 G2/G3/G4/G5/G9，另跑 1/30s 稠密亮度序列收 G6
+  // （2.5Hz 的判定至少要 >5Hz 采样）。判据与 `?probe=global` 是同一份代码
+  // （scanGlobalRules + globalVerdict），不会出现「探针绿、自检红」。
+  try {
+    const rep = await scanGlobalRules(0.2, 1 / 30, (i, n, phase) => {
+      if (phase === 'lum' && i % 600 === 0) renderSelftestPanel([...lines, `  · 全局扫描亮度序列 ${i}/${n}`])
+    })
+    const v = globalVerdict(rep)
+    for (const [id, r] of [
+      ['g2 语言', v.g2],
+      ['g3 唯一性', v.g3],
+      ['g4 拨杆', v.g4],
+      ['g5 安全区', v.g5],
+      ['g6 光敏', v.g6],
+      ['g9 无太阳', v.g9],
+    ]) {
+      await say(id, r.ok, r.detail)
+      await yieldNow()
+    }
+  } catch (e) {
+    for (const id of ['g2 语言', 'g3 唯一性', 'g4 拨杆', 'g5 安全区', 'g6 光敏', 'g9 无太阳']) {
+      await say(id, false, String(e && e.message))
+      await yieldNow()
+    }
+  }
+  await yieldNow()
+
+  // ---- T55) FIX_V5 §3 新增自检：棱镜三边 / 心脏 yaw / CRT 纵横比 ----
+  // 判据逐字取自 FIX_V5 §3：「棱镜三边长相对误差 <0.5%」「心脏 yaw(205.964) mod 2π <0.05rad」
+  // 「CRT 开关机帧中画面内容的纵横比不变(G7)」。三项只读既有实现暴露的 metrics 与幕布几何，
+  // 不改任何检测器口径，也不动上面的 g2–g9。
+  try {
+    const lsc = SCENES.find((s) => s.id === 'L')
+    renderAt(175.3) // 棱镜在场（173.15→177.40，env=1/fade=1），此时 metrics.prism 才会被写
+    const pr = lsc && lsc.metrics && lsc.metrics.prism
+    const eErr = pr ? pr.edgeErrPct : undefined
+    await say(
+      'z1 棱镜三边',
+      typeof eErr === 'number' && Number.isFinite(eErr) && eErr < 0.5,
+      pr && pr.edges
+        ? `t=175.3 三边 ${pr.edges.map((v) => v.toFixed(1)).join(' / ')}px，相对误差 ${eErr}%（判据 <0.5%）`
+        : '拿不到 metrics.prism（棱镜未绘制？）'
+    )
+  } catch (e) {
+    await say('z1 棱镜三边', false, String(e && e.message))
+  }
+  await yieldNow()
+
+  try {
+    const nsc = SCENES.find((s) => s.id === 'N')
+    const yawAt = (t) => {
+      renderAt(t)
+      return nsc && nsc.metrics ? nsc.metrics.heartYaw : NaN
+    }
+    const y0 = yawAt(200.0)
+    const y1 = yawAt(203.0)
+    const y2 = yawAt(205.9)
+    renderAt(205.964)
+    const spin = nsc && nsc.metrics ? nsc.metrics.heartSpinExact : NaN
+    const gap = nsc && nsc.metrics ? nsc.metrics.heartYawGapAtLast : NaN
+    const w1 = (y1 - y0) / 3.0
+    const w2 = (y2 - y1) / 2.9
+    // 匀速 = 三段采样间的角速度恒等于声明的 HEART_SPIN（既不停转、也没有顿帧/回跳）
+    const uniform =
+      [w1, w2, spin].every((v) => Number.isFinite(v)) &&
+      Math.abs(w1 - spin) < 1e-6 &&
+      Math.abs(w2 - spin) < 1e-6 &&
+      Math.abs(w1 - w2) < 1e-6
+    await say(
+      'z2 心脏 yaw',
+      uniform && Number.isFinite(gap) && gap < 0.05,
+      `t=205.964 时 yaw 距 2π 整数倍 ${Number.isFinite(gap) ? gap.toFixed(5) : 'NaN'}rad（判据 <0.05）；` +
+        `分段角速度 ${w1.toFixed(6)} / ${w2.toFixed(6)} vs HEART_SPIN ${Number.isFinite(spin) ? spin.toFixed(6) : 'NaN'} rad·s⁻¹ ⇒ 匀速自转 ${uniform ? '是' : '否'}`
+    )
+  } catch (e) {
+    await say('z2 心脏 yaw', false, String(e && e.message))
+  }
+  await yieldNow()
+
+  try {
+    // G7 判别法（与 T54 探针同口径）：自然帧的可见带 vs 全开参考帧**同一行区间**
+    // （裁剪 ⇒ 只差扫描线/亮线），对比 vs 全开参考帧**纵向压进带内**（= T54 之前的旧压扁行为）。
+    // 前者必须明显更小 ⇒ 内容 1:1、纵横比不变。
+    const sc = canvas.height / comp.H
+    const gw = canvas.width
+    const mkScratch = (h) => {
+      const c = document.createElement('canvas')
+      c.width = gw
+      c.height = Math.max(1, h)
+      return { c, g: c.getContext('2d', { willReadFrequently: true }) }
+    }
+    const parts = []
+    let allOk = true
+    let worst = Infinity
+    for (const t of [0.5, 0.7, 209.4, 209.8]) {
+      fx.setCrtLevel(null)
+      renderAt(t)
+      const band = comp.crtBand
+      if (!band || !(band.level > 0.02) || band.level >= 0.999) {
+        allOk = false
+        parts.push(`t=${t} 无幕布`)
+        continue
+      }
+      const y0 = Math.round(band.bandY * sc)
+      const hh = Math.max(2, Math.round(band.bandH * sc))
+      const pad = Math.max(1, Math.round(8 * sc))
+      const S = mkScratch(hh)
+      S.g.drawImage(canvas, 0, y0, gw, hh, 0, 0, gw, hh)
+      const nat = S.g.getImageData(0, 0, gw, hh).data
+      fx.setCrtLevel(1)
+      renderAt(t)
+      const R = mkScratch(hh)
+      R.g.drawImage(canvas, 0, y0, gw, hh, 0, 0, gw, hh)
+      const ref = R.g.getImageData(0, 0, gw, hh).data
+      const Q = mkScratch(hh)
+      Q.g.drawImage(canvas, 0, 0, gw, canvas.height, 0, 0, gw, hh)
+      const sq = Q.g.getImageData(0, 0, gw, hh).data
+      let dSame = 0
+      let dScale = 0
+      let n = 0
+      const rowBytes = gw * 4
+      const x0 = pad * 4
+      const x1 = rowBytes - pad * 4
+      for (let j = pad; j < hh - pad; j++) {
+        const base = j * rowBytes
+        for (let k = x0; k < x1; k++) {
+          dSame += Math.abs(nat[base + k] - ref[base + k])
+          dScale += Math.abs(nat[base + k] - sq[base + k])
+        }
+        n += x1 - x0
+      }
+      const dSameM = n ? dSame / n : NaN
+      const dScaleM = n ? dScale / n : NaN
+      const ratio = dScaleM / Math.max(1e-6, dSameM)
+      if (!(ratio > 1)) allOk = false
+      worst = Math.min(worst, ratio)
+      parts.push(
+        `t=${t} L=${band.level.toFixed(3)} 裁剪差 ${dSameM.toFixed(2)} / 压扁差 ${dScaleM.toFixed(2)} ⇒ ${ratio.toFixed(2)}×`
+      )
+    }
+    fx.setCrtLevel(null)
+    await say(
+      'z3 CRT 纵横比',
+      allOk,
+      `${parts.join('；')}（判据：每个时刻 裁剪差 < 压扁差，最小 ${Number.isFinite(worst) ? worst.toFixed(2) : 'NaN'}×）`
+    )
+  } catch (e) {
+    fx.setCrtLevel(null)
+    await say('z3 CRT 纵横比', false, String(e && e.message))
   }
   await yieldNow()
 

@@ -495,64 +495,253 @@ const NET_LAYERS = [4, 6, 6, 4]
 const NET_X = [-1.25, -0.42, 0.42, 1.25]
 
 /**
- * T18b / FIX_V4 §1.6 E2（`satisfaction` 65.70）：
- * 「**金色奖励宝珠随每拍长大并射出光线**，相机**绕行**；**金→白**」。
- * 实现要点：
- *   · **长大**由调用方按"窗口内已经过的起音点数"算半径并传进来（`radius`）—— 真的是"随每拍"；
- *   · **射出光线**用 12 条细长锥（`ConeGeometry`），长度随节拍脉动并绕球心分布；
- *   · **相机绕行**的观感用 `group.rotation.y/z` 自转 + 相对相机的横向摆位实现（本文件不建相机，§注释有说明）；
- *   · **金→白**：`core/halo/ray` 三件套的颜色一起从 `#ffd479` lerp 到 `#ffffff`（`white` 由调用方给）。
+ * T45 / FIX_V5 §E（1:05，词锚点 `satisfaction` 65.70）：
+ * 「删除右侧「太阳」(金宝珠与放射光线)。satisfaction 一拍改为:3D 奖励曲线——一条发光折线
+ *   随每个起音点向右上攀升,线头是亮点并拖出粒子尾迹,曲线下方有渐变填充,相机缓慢横移;
+ *   配色金→白,但不得有圆盘形主体。」
+ *
+ * 为什么必须替换掉原来的 `buildRewardOrb`（球壳 ×2 + 12 根锥）：它正好落进 G9 的**结构**判据
+ * 「同一父节点下 ≥1 个圆盘/球 + ≥6 根锥/盒/柱」（`src/ui/globalrules.js` 的 `sunStructures()` ②），
+ * 实测 64.8–68.2s 报 `e:orb 2disc+12rays`（T42 的 g9 FAIL 之一，FIX_V5 §E 点名删）。
+ *
+ * 画法要点：
+ *   · 折线是**带状 mesh**（三角带 + 逐顶点 RGBA），不是 `THREE.Line` —— LineBasicMaterial 的
+ *     `lineWidth` 在绝大多数平台被忽略（恒 1px），画不出"发光折线 + 粗线头"；
+ *   · "随每个起音点向右上攀升"= 折线的**揭示进度 u** 由 `satisfaction` 窗口内的起音点定相
+ *     （每过一个起音点跳一级，级内连续推进），折线形状本身是 8 级阶梯（折角清楚）；
+ *   · 线头亮点 = `Sprite`（径向渐变贴图），尾迹 = `Points`（逐顶点 α 递减、跟随线头）；
+ *   · 曲线下方渐变填充 = 第二条三角带（曲线侧 α 高、基线侧 α→0）；
+ *   · 整组只有 4 个子节点、无球/圆盘类几何 ⇒ 结构上不可能再命中 G9②。
  */
-function buildRewardOrb() {
-  const grp = new THREE.Group()
-  grp.name = 'e:orb'
-  const coreMat = new THREE.MeshBasicMaterial({ color: 0xffe6a3, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.16, 24, 18), coreMat)
-  const haloMat = new THREE.MeshBasicMaterial({ color: 0xffc46b, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
-  const halo = new THREE.Mesh(new THREE.SphereGeometry(0.3, 20, 14), haloMat)
-  const rayMat = new THREE.MeshBasicMaterial({ color: 0xffe9b8, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
-  const rays = []
-  for (let i = 0; i < 12; i++) {
-    const m = new THREE.Mesh(new THREE.ConeGeometry(0.013, 0.42, 6), rayMat)
-    grp.add(m)
-    rays.push(m)
+const REW_STAIRS = 8 // 折线的折点数（阶梯式攀升；"折线"而不是光滑曲线）
+const REW_PTS = 96 // 折线采样点数
+const REW_TRAIL = 72 // 尾迹粒子数
+const REW_X0 = -0.62
+const REW_X1 = 0.54
+const REW_Y0 = -0.34
+const REW_Y1 = 0.4
+
+/** s∈[0,1] → 阶梯攀升量 [0,1]：每级"先升后平"，转折处是折角 */
+function rewardStair(s) {
+  const x = clamp(s) * REW_STAIRS
+  const k = Math.min(REW_STAIRS - 1, Math.floor(x))
+  const f = x - k
+  const r = f < 0.45 ? f / 0.45 : 1
+  return (k + r) / REW_STAIRS
+}
+
+/** 64px 径向渐变贴图（线头亮点与尾迹粒子共用；否则 `Points` 画出来是方块） */
+function rewardDotTexture(size = 64) {
+  const c = document.createElement('canvas')
+  c.width = size
+  c.height = size
+  const g = c.getContext('2d')
+  const r = size / 2
+  const grd = g.createRadialGradient(r, r, 0, r, r, r)
+  grd.addColorStop(0, 'rgba(255,255,255,1)')
+  grd.addColorStop(0.35, 'rgba(255,255,255,0.55)')
+  grd.addColorStop(1, 'rgba(255,255,255,0)')
+  g.fillStyle = grd
+  g.fillRect(0, 0, size, size)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
+
+/** 三角带索引：2 行 × n 列（第 0 行 = 曲线/上沿，第 1 行 = 下沿） */
+function ribbonIndex(n) {
+  const idx = []
+  for (let i = 0; i < n - 1; i++) {
+    const a = i * 2
+    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2)
   }
-  grp.add(halo, core)
+  return idx
+}
+
+function buildRewardCurve() {
+  const grp = new THREE.Group()
+  grp.name = 'e:reward'
   const GOLD = new THREE.Color(0xffd479)
   const WHITE = new THREE.Color(0xffffff)
-  const col = new THREE.Color()
+  const tmp = new THREE.Color()
+
+  const lineGeo = new THREE.BufferGeometry()
+  const linePos = new Float32Array(REW_PTS * 2 * 3)
+  const lineCol = new Float32Array(REW_PTS * 2 * 4)
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3).setUsage(THREE.DynamicDrawUsage))
+  lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 4).setUsage(THREE.DynamicDrawUsage))
+  lineGeo.setIndex(ribbonIndex(REW_PTS))
+  const lineMat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  })
+  const line = new THREE.Mesh(lineGeo, lineMat)
+  line.frustumCulled = false
+  line.renderOrder = 26
+  grp.add(line)
+
+  const fillGeo = new THREE.BufferGeometry()
+  const fillPos = new Float32Array(REW_PTS * 2 * 3)
+  const fillCol = new Float32Array(REW_PTS * 2 * 4)
+  fillGeo.setAttribute('position', new THREE.BufferAttribute(fillPos, 3).setUsage(THREE.DynamicDrawUsage))
+  fillGeo.setAttribute('color', new THREE.BufferAttribute(fillCol, 4).setUsage(THREE.DynamicDrawUsage))
+  fillGeo.setIndex(ribbonIndex(REW_PTS))
+  const fillMat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  })
+  const fill = new THREE.Mesh(fillGeo, fillMat)
+  fill.frustumCulled = false
+  fill.renderOrder = 24
+  grp.add(fill)
+
+  const dotTex = rewardDotTexture(64)
+  const head = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: dotTex,
+      color: 0xffd479,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      opacity: 0,
+    }),
+  )
+  head.frustumCulled = false
+  head.renderOrder = 27
+  head.scale.setScalar(0.16)
+  grp.add(head)
+
+  const trailGeo = new THREE.BufferGeometry()
+  const trailPos = new Float32Array(REW_TRAIL * 3)
+  const trailCol = new Float32Array(REW_TRAIL * 4)
+  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3).setUsage(THREE.DynamicDrawUsage))
+  trailGeo.setAttribute('color', new THREE.BufferAttribute(trailCol, 4).setUsage(THREE.DynamicDrawUsage))
+  const trailMat = new THREE.PointsMaterial({
+    size: 0.045,
+    map: dotTex,
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+  })
+  const trail = new THREE.Points(trailGeo, trailMat)
+  trail.frustumCulled = false
+  trail.renderOrder = 25
+  grp.add(trail)
+
+  const curveX = (s) => REW_X0 + (REW_X1 - REW_X0) * s
+  const curveY = (s) => REW_Y0 + (REW_Y1 - REW_Y0) * rewardStair(s)
+  const BASE_Y = REW_Y0 - 0.12
+
   return {
     object: grp,
-    core: core,
-    halo: halo,
-    rays: rays,
+    line: line,
+    fill: fill,
+    head: head,
+    trail: trail,
     update(t, o = {}) {
-      const alpha = o.alpha == null ? 1 : o.alpha
-      const radius = o.radius == null ? 0.16 : o.radius
-      const rayLen = o.rayLen == null ? 1 : o.rayLen
+      const alpha = clamp(o.alpha == null ? 1 : o.alpha)
+      const u = clamp(o.u == null ? 1 : o.u)
       const white = clamp(o.white == null ? 0 : o.white)
       grp.visible = alpha > 0.01
       if (!grp.visible) return
-      // 相机绕行：自转（本文件不建相机，rig 负责位移，这里给"绕行"的相对转动）
-      grp.rotation.y = t * 0.38
-      grp.rotation.z = t * 0.13
-      const k = Math.max(0.05, radius / 0.16)
-      core.scale.setScalar(k)
-      halo.scale.setScalar(k * (1 + 0.12 * Math.sin(t * 4)))
-      coreMat.opacity = alpha * 0.95
-      haloMat.opacity = alpha * 0.34
-      rayMat.opacity = alpha * 0.72
-      col.copy(GOLD).lerp(WHITE, white)
-      coreMat.color.copy(col)
-      haloMat.color.copy(col)
-      rayMat.color.copy(col)
-      for (let i = 0; i < rays.length; i++) {
-        const a = (i / rays.length) * Math.PI * 2 + t * 0.2
-        const L = rayLen * (0.7 + 0.5 * Math.abs(Math.sin(t * 3.1 + i)))
-        rays[i].position.set(Math.cos(a) * (radius + 0.2 * L), Math.sin(a) * (radius + 0.2 * L), 0)
-        rays[i].rotation.z = a - Math.PI / 2
-        rays[i].scale.set(1, L, 1)
+      const hx = curveX(u)
+      const hy = curveY(u)
+      const wid = (s) => (0.012 + 0.03 * s) * 0.5
+
+      for (let i = 0; i < REW_PTS; i++) {
+        const s = i / (REW_PTS - 1)
+        const on = s <= u
+        const x = on ? curveX(s) : hx
+        const y = on ? curveY(s) : hy
+        // 切线 → 法线：带宽沿法向，折角处不会变细
+        const s2 = Math.min(1, s + 0.01)
+        const s1 = Math.max(0, s - 0.01)
+        const tx = (REW_X1 - REW_X0) * (s2 - s1)
+        const ty = (REW_Y1 - REW_Y0) * (rewardStair(s2) - rewardStair(s1))
+        const L = Math.hypot(tx, ty) || 1
+        const nx = -ty / L
+        const ny = tx / L
+        const w = on ? wid(s) : 0
+        linePos[i * 6 + 0] = x - nx * w
+        linePos[i * 6 + 1] = y - ny * w
+        linePos[i * 6 + 2] = 0
+        linePos[i * 6 + 3] = x + nx * w
+        linePos[i * 6 + 4] = y + ny * w
+        linePos[i * 6 + 5] = 0
+        tmp.copy(GOLD).lerp(WHITE, clamp(0.15 + 0.85 * (s * 0.5 + white * 0.8)))
+        for (let k = 0; k < 2; k++) {
+          const c = i * 8 + k * 4
+          lineCol[c + 0] = tmp.r
+          lineCol[c + 1] = tmp.g
+          lineCol[c + 2] = tmp.b
+          lineCol[c + 3] = on ? 1 : 0
+        }
+        // 填充：上沿贴着曲线，下沿落到基线；纵向 α 由 0.34 → 0.02
+        fillPos[i * 6 + 0] = x
+        fillPos[i * 6 + 1] = y
+        fillPos[i * 6 + 2] = -0.002
+        fillPos[i * 6 + 3] = on ? curveX(s) : hx
+        fillPos[i * 6 + 4] = BASE_Y
+        fillPos[i * 6 + 5] = -0.002
+        tmp.copy(GOLD).lerp(WHITE, clamp(0.1 + 0.9 * white))
+        for (let k = 0; k < 2; k++) {
+          const c = i * 8 + k * 4
+          fillCol[c + 0] = tmp.r
+          fillCol[c + 1] = tmp.g
+          fillCol[c + 2] = tmp.b
+          fillCol[c + 3] = on ? (k === 0 ? 0.34 : 0.02) : 0
+        }
       }
+      lineGeo.attributes.position.needsUpdate = true
+      lineGeo.attributes.color.needsUpdate = true
+      fillGeo.attributes.position.needsUpdate = true
+      fillGeo.attributes.color.needsUpdate = true
+      lineMat.opacity = alpha
+      fillMat.opacity = alpha
+
+      // 线头亮点（呼吸 + 跟随线头）
+      head.position.set(hx, hy, 0.02)
+      head.material.opacity = alpha * (0.8 + 0.2 * Math.sin(t * 6))
+      head.scale.setScalar(0.14 + 0.035 * (1 + Math.sin(t * 6)))
+      head.material.color.copy(tmp.copy(GOLD).lerp(WHITE, white))
+
+      // 尾迹：沿线头之后 0.3 个参数段拖出，逐粒子 α 递减
+      for (let j = 0; j < REW_TRAIL; j++) {
+        const lag = (j + 1) / REW_TRAIL
+        const s = u - lag * 0.3
+        const on = s >= 0
+        const jx = (hash01(j, 91) - 0.5) * 0.035
+        const jy = (hash01(j, 92) - 0.5) * 0.035 + 0.012 * Math.sin(t * 3.1 + j * 0.9)
+        trailPos[j * 3 + 0] = on ? curveX(s) + jx : hx
+        trailPos[j * 3 + 1] = on ? curveY(s) + jy : hy
+        trailPos[j * 3 + 2] = -0.01 - 0.02 * lag
+        tmp.copy(WHITE).lerp(GOLD, lag * 0.85 + 0.1 * (1 - white))
+        trailCol[j * 4 + 0] = tmp.r
+        trailCol[j * 4 + 1] = tmp.g
+        trailCol[j * 4 + 2] = tmp.b
+        trailCol[j * 4 + 3] = on ? Math.pow(1 - lag, 1.6) : 0
+      }
+      trailGeo.attributes.position.needsUpdate = true
+      trailGeo.attributes.color.needsUpdate = true
+      trailMat.opacity = alpha
+    },
+    dispose() {
+      lineGeo.dispose()
+      lineMat.dispose()
+      fillGeo.dispose()
+      fillMat.dispose()
+      trailGeo.dispose()
+      trailMat.dispose()
+      head.material.dispose()
+      dotTex.dispose()
     },
   }
 }
@@ -814,9 +1003,11 @@ export default {
     this.net = buildNeuralNet()
     this.grp.add(this.net.object)
 
-    /* ---------- ①b E2 satisfaction：金色奖励宝珠（T18b / §1.6 E2） ---------- */
-    this.orb = buildRewardOrb()
-    this.grp.add(this.orb.object)
+    /* ---------- ①b E2 satisfaction：3D 奖励曲线（T45 / FIX_V5 §E） ---------- */
+    // FIX_V5 §E：「1:05 删除右侧「太阳」(金宝珠与放射光线)」—— 原 `buildRewardOrb()`
+    // （球壳 ×2 + 12 根放射锥，组名 `e:orb`）已整组删除；同一拍改为**奖励曲线**。
+    this.reward = buildRewardCurve()
+    this.grp.add(this.reward.object)
 
     /* ---------- ② 彩色粒子迸发 ---------- */
     this.burst = createBurst(BURST_PER * BURST_MAX)
@@ -933,6 +1124,15 @@ export default {
     }
 
     /* ---------- ⑦ 奖励条 14 格（旧文件 CELLS=14 的 3D 化） ---------- */
+    // ⚠️ T45：14 格**必须**收进自己的组 `e:bars`，不能平铺在 `this.grp`（`segE`）下 ——
+    // G9 的结构判据看的是"**同一个父节点**下 ≥1 个圆盘/球 + ≥6 根锥/盒/柱"，14 个 Box 平铺在
+    // `segE` 下时，只要同时有 2 圈冲击波环（`RingGeometry`）可见，`segE` 本身就会被判成"太阳"：
+    // 实测 t=69.6/69.8 报 `segE Group kids=28 disc=2 rays=14 ["BoxGeometry"]`（T42 的第二个
+    // g9 FAIL）。奖励条是一列格子、不是"放射线"，把它的父子结构如实表达出来即可（不是放宽门槛：
+    // 判据与阈值一个字没改，见 src/ui/globalrules.js:200-228）。
+    this.barGrp = new THREE.Group()
+    this.barGrp.name = 'e:bars'
+    this.grp.add(this.barGrp)
     this.barCells = []
     this.barMats = []
     for (let i = 0; i < CELLS; i++) {
@@ -945,7 +1145,7 @@ export default {
       })
       const m = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.1, 0.07), mat)
       m.position.set(-2.42, -1.02 + i * 0.157, -0.3)
-      this.grp.add(m)
+      this.barGrp.add(m)
       this.barCells.push(m)
       this.barMats.push(mat)
     }
@@ -1079,33 +1279,39 @@ export default {
       })
     }
 
-    /* ================= ①b E2 satisfaction：金色奖励宝珠 ================= */
-    // §1.6 E2：「金色奖励宝珠**随每拍长大**并**射出光线**，相机**绕行**；**金→白**」。
-    // "随每拍长大"= 取窗口内**已经过的起音点数**当长大步数（真的跟着节拍，不是线性插值）。
+    /* ================= ①b E2 satisfaction：3D 奖励曲线（T45 / FIX_V5 §E） ================= */
+    // §E：「3D 奖励曲线——一条发光折线**随每个起音点向右上攀升**，线头是亮点并拖出粒子尾迹，
+    //      曲线下方有渐变填充，相机缓慢横移；配色金→白，但不得有圆盘形主体」。
+    // 揭示进度 u 由 `satisfaction` 窗口内的**起音点**定相：每过一个起音点跳一级、级内连续推进
+    // （于是既有"随起音点攀升"的台阶，也不会在起音点之间僵住）。实测本窗口 64.7–68.0 内只有
+    // 2 个起音点，故用 (已过起音点数 + 级内比例) / 起音点总数。
+    // "相机缓慢横移"由 rig.js 已有的轨迹提供（59.0 x=0 → 66.6 x=1.4 → 74.0 x=0.4；实测
+    // 64.7/66.6/70.0 三点 x = 1.585/1.391/0.965），本文件不建相机。
     const tSat = TL.satisfaction.t
-    const orbA = clamp(span(t, tSat - 1.0, tSat + 0.4)) * (1 - clamp(span(t, TL.happy.t - 0.5, TL.happy.t + 0.3)))
-    if (this.orb) {
-      let beats = 0
+    const rewA = clamp(span(t, tSat - 1.0, tSat + 0.4)) * (1 - clamp(span(t, TL.happy.t - 0.5, TL.happy.t + 0.3)))
+    if (this.reward) {
+      let ons = []
       try {
-        beats = (ctx.sync.onsetsIn(tSat - 0.4, t) || []).length
+        ons = ctx.sync.onsetsIn(tSat - 0.9, tHappy + 0.6) || []
       } catch (e) {
-        beats = 0
+        ons = []
       }
-      // 每拍一个台阶（起音点计数）× 窗口内的单调增长
-      // —— 实测 E2 窗口（65.3–68.0）里只有 **2** 个起音点，若只按台阶会长得很"钝"；
-      //    叠一个 6% 的单调项后，"随每拍长大"仍然成立（台阶清楚），整体也更像"在长大"。
-      const growSpan = Math.max(0.4, TL.happy.t - tSat)
-      const radius = (0.14 + 0.055 * Math.min(beats, 8)) * (1 + 0.06 * clamp((t - tSat) / growSpan))
+      // ⚠️ `sync.onsetsIn()` 返回的是 **`{t, s}` 对象数组**（时间 + 强度），不是数字数组
+      // （src/core/sync.js:126-129；src/scenes/h_absence.js:200 也记着这条坑）。取 `o.t`。
+      const onT = ons
+        .map((o) => (typeof o === 'number' ? o : o.t))
+        .filter((v) => Number.isFinite(v))
+        .sort((a, b) => a - b)
+      let beats = 0
+      for (const o of onT) if (o <= t) beats++
+      const prevOn = beats > 0 ? onT[beats - 1] : tSat - 1.0
+      const nextOn = beats < onT.length ? onT[beats] : tHappy + 0.6
+      const frac = clamp((t - prevOn) / Math.max(0.12, nextOn - prevOn))
+      const u = onT.length ? clamp((beats + frac) / onT.length) : clamp(span(t, tSat - 1.0, tHappy + 0.4))
       const white = clamp((t - tSat) / Math.max(0.4, TL.happy.t - tSat))
-      const cam = ctx.three.camera
-      this.orb.object.position.set(cam.position.x + 0.28 * Math.sin(t * 0.5), cam.position.y + 0.02, cam.position.z - 1.5)
-      this.orb.update(t, {
-        alpha: orbA,
-        radius: radius,
-        rayLen: 0.8 + 0.5 * Math.abs(Math.sin(t * 3.1)),
-        white: white,
-      })
-      this.metrics.orb = { a: +orbA.toFixed(2), beats: beats, r: +radius.toFixed(3), white: +white.toFixed(2) }
+      this.reward.object.position.set(cam.position.x + 0.28, cam.position.y, cam.position.z - 1.6)
+      this.reward.update(t, { alpha: rewA, u: u, white: white })
+      this.metrics.reward = { a: +rewA.toFixed(2), beats: beats, onsets: onT.length, u: +u.toFixed(2), white: +white.toFixed(2) }
     }
 
     /* ================= T19a / §1.6 E3：暖色（happy 拍） ================= */
@@ -1480,6 +1686,7 @@ export default {
     if (this.burst) this.burst.dispose()
     if (this.num) this.num.dispose()
     if (this.gridTex) this.gridTex.dispose()
+    if (this.reward) this.reward.dispose()
     if (this.shocks) for (const sh of this.shocks) { sh.geometry.dispose(); sh.material.dispose() }
     if (this.frame && this.frame.material) this.frame.material.dispose()
   },

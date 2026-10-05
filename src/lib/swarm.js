@@ -201,6 +201,32 @@ function layoutVortex(n, seed, { r0 = 0.22, r1 = 1.9 } = {}) {
   return a
 }
 
+/**
+ * 面向镜头的旋涡（T44 / FIX_V5 §D 0:51「眩晕」）。
+ * 原文：「『眩晕』改为:持久蜂群的字形粒子聚成旋涡(漩涡中心是黑色深孔),转速加快、
+ *        相机 roll 加速、青/洋红双重影;旋涡中心在 52.77 变成时间隧道入口(桥接)。
+ *        要有色彩与层次,不要白色细线团。」
+ *
+ * 与 layoutVortex（段 K 的黑洞吸积盘，几乎侧视的水平盘）不同，这里刻意做成**正对镜头**的
+ * 螺旋：盘面就是 x-y 平面（相机沿 −z 看进来），轴心正对画面中心 —— 52.77 起段 D 的时间隧道
+ * 环也套在视线中心上，于是"旋涡中心 = 隧道入口"在几何上真的成立（桥接看得出来）。
+ * `r0` 之内**不放粒子**：中心因此是原文要的"**黑色深孔**"（深海背景直接透出来）。
+ */
+function layoutSwirl(n, seed, { r0 = 0.34, r1 = 1.6, twist = 2.2, arms = 3 } = {}) {
+  const a = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) {
+    const v = hash01(i, seed + 141)
+    const r = r0 + (r1 - r0) * Math.sqrt(v)
+    const k = (r - r0) / Math.max(1e-6, r1 - r0) // 0 = 核缘，1 = 外缘
+    // 对数螺线：越靠内转得越多 + 固定 arm 数（只有 ±0.35rad 抖动）→ 旋臂真的看得出
+    const th = ((i % arms) / arms) * TAU + (hash01(i, seed + 142) - 0.5) * 0.7 + twist * TAU * (1 - k)
+    a[i * 3] = Math.cos(th) * r
+    a[i * 3 + 1] = Math.sin(th) * r
+    a[i * 3 + 2] = (hash01(i, seed + 143) - 0.5) * 0.14 * (0.4 + k) // 盘子有薄厚度（"层次"）
+  }
+  return a
+}
+
 /** 爆散（碎片 / 大爆炸） */
 function layoutScatter(n, seed, { radius = 2.6 } = {}) {
   const a = new Float32Array(n * 3)
@@ -258,6 +284,7 @@ export const LAYOUTS = {
   heart: layoutHeart,
   tunnel: layoutTunnel,
   vortex: layoutVortex,
+  swirl: layoutSwirl,
   scatter: layoutScatter,
   text: layoutText,
 }
@@ -320,7 +347,7 @@ export const BRIDGES = [
   { from: 'A', to: 'B', at: 14.5, element: '世界种子立方体膨胀成隧道的第一个门环，相机飞入', swarm: ['cube', 'ring'] },
   { from: 'B', to: 'C', at: 29.7, element: '隧道里所有展品溶解回蜂群，蜂群散成点云', swarm: ['tunnel', 'cloud'] },
   { from: 'C', to: 'D', at: 44.0, element: '极限墙(ε 带)旋转成示波器屏幕，曲线变成交流波形', swarm: ['grid', 'sine'] },
-  { from: 'D', to: 'E', at: 59.0, element: '下潜的深度环最后一圈变成超立方体外框（允许闪白）', swarm: ['ring', 'cube'] },
+  { from: 'D', to: 'E', at: 59.0, element: '下潜的深度环最后一圈变成超立方体外框（允许闪白）', swarm: ['swirl', 'cube'] },
   { from: 'E', to: 'F', at: 74.0, element: '合拢的玻璃笼变成展示柜，茄子/番茄/猫依次放入', swarm: ['cube', 'grid'] },
   { from: 'F', to: 'G', at: 88.8, element: '唯一的光标变成开关的滑块，滑动起来', swarm: ['cloud', 'ring'] },
   { from: 'G', to: 'H', at: 103.5, element: '测量坍缩的那个亮点变成波形的原点，向外展开', swarm: ['ring', 'sine'] },
@@ -352,7 +379,19 @@ export const SEGMENT_SWARM = {
   A: { from: 'cloud', to: 'cube', t0: 8.6, t1: 14.2, size: 0.05, alpha: 0.14 },
   B: { from: 'ring', to: 'tunnel', t0: 16.2, t1: 21.5, size: 0.045, alpha: 0.16 },
   C: { from: 'cloud', to: 'grid', t0: 36.5, t1: 43.6, size: 0.05, alpha: 0.34, chars: false },
-  D: { from: 'sine', to: 'ring', t0: 52.5, t1: 58.6, size: 0.045, alpha: 0.18 },
+  // T44 / FIX_V5 §D 0:51（原文见 layoutSwirl）：段 D 的蜂群在 48.6–52.3 从 sine 聚成
+  // **旋涡**（正对镜头、中心留黑孔），52.77 起时间隧道入口就接在旋涡中心。这些数值都动过：
+  //   · to: 'ring' → 'swirl'（旧的 ring 是"一圈亮粒子"，读不出旋涡）；
+  //   · alpha 0.18 → 0.42、size 0.045 → 0.05：这一段的眩晕主体**就是它**（旧的 0.18 只够当背景，
+  //     而这一段的自有几何在 50s 前后已经全部淡出）；也是原文"要有色彩与层次"的落点。
+  //   · t0/t1 49.2–52.7 → 48.6–52.4：把"成形"整体提前一点，使 52.77 的隧道入口之前
+  //     旋涡已经收口。**注意这一段的关键事实（实测，别改回去）**：49.0–51.6 画面本来就黑，
+  //     那不是空屏 bug —— 段 D 自己的"闭眼/睁眼"2D 眼睑（d_switch.js 的 drawLids）在这段时间
+  //     用 `rgba(6,8,12,1)` 盖住全屏，睁眼区间是 50.435–51.635（dizzy1+0.4 → +1.6）。
+  //     实测证据：同一个 t=49，WebGL 画布 mean 0.2199/lit 1.00，而 #stage 只有 0.0298/0.0025
+  //     —— 亮的是蜂群，盖住它的是眼睑。所以旋涡要**在眼睑后面成形**，睁眼时正好看到它。
+  //   · spin: true → 见下面的 SPIN 表（自转加速，"转速加快"）。
+  D: { from: 'sine', to: 'swirl', t0: 48.6, t1: 52.4, size: 0.05, alpha: 0.42, spin: true },
   E: { from: 'cube', to: 'grid', t0: 68.0, t1: 73.6, size: 0.045, alpha: 0.20 },
   F: { from: 'grid', to: 'ring', t0: 82.5, t1: 88.4, size: 0.045, alpha: 0.22 },
   G: { from: 'ring', to: 'text', t0: 97.5, t1: 103.1, size: 0.045, alpha: 0.26 },
@@ -412,6 +451,24 @@ export function swarmCharsAt(t) {
 }
 
 /**
+ * T44 / FIX_V5 §D 0:51「转速加快」：旋涡的**自转角**（弧度；纯函数 f(t)）。
+ *
+ * 为什么用"绝对角度"而不是"角速度 × t"：后者的加速度只能靠 `uSpin` 随时间变化，
+ * 而角度 = t·ω(t) 的导数 = ω + t·ω′ —— t≈50 时 ω′ 被放大 50 倍，屏幕上是随机乱转。
+ * 这里直接给角度：角速度从 `rate` 起、以 `accel`(rad/s²) 线性加速到窗口末，**窗口后冻结**。
+ * 冻结不是偷懒：52.77 之后旋涡中心已成隧道入口，隧道自带流向，再让整片粒子继续加速打转
+ * 只会把隧道糊掉（也会让 59.0 桥接出来的 cube 以 5rad/s 自转）。
+ */
+const SPIN = { D: { t0: 48.6, t1: 53.2, rate: 0.9, accel: 0.55 } }
+
+function spinAngleAt(seg, t) {
+  const s = SPIN[seg]
+  if (!s) return 0
+  const x = clamp(t - s.t0, 0, s.t1 - s.t0)
+  return s.rate * x + 0.5 * s.accel * x * x // 0.9→3.4 rad/s，累计 ≈10.0rad（约 1.6 圈）
+}
+
+/**
  * 全片蜂群调度（纯函数，f(t)）。
  * 优先级：桥接窗口 > 段内形变窗 > 段常驻布局。
  * @param {number} t
@@ -432,6 +489,8 @@ export function swarmScheduleAt(t) {
     alpha: S.alpha,
     colorA: col[0],
     colorB: col[1],
+    // T44：旋涡自转角（弧度）。其它段落恒 0 → 顶点着色器里的旋转是恒等变换。
+    spin: spinAngleAt(seg, t),
   }
   // 段内形变窗：先飞向本段终点布局
   if (t >= S.t0 && t <= S.t1) {
@@ -478,6 +537,8 @@ export function swarmStateAt(t) {
       alpha: Math.min(1, S.alpha + 0.1),
       colorA: (SEGMENT_COLORS[active.from] || SEGMENT_COLORS.A)[0],
       colorB: (SEGMENT_COLORS[active.to] || SEGMENT_COLORS.A)[1],
+      // 桥接途中沿用"来向段"的自转角（D→E 时它是冻结值，所以旋涡不会在桥接里突然倒转）
+      spin: spinAngleAt(active.from, t),
     }
   }
   // 段内形变窗 / 段常驻布局
@@ -531,6 +592,8 @@ uniform float uTime;
 uniform vec3 uCamRight;
 uniform vec3 uCamUp;
 uniform float uSpread;
+uniform float uSpin;
+uniform float uBeat;
 uniform vec2 uAtlasGrid;
 varying vec2 vUv;
 varying vec3 vTint;
@@ -541,13 +604,20 @@ void main() {
   // 形变途中给一点向外鼓的力，避免粒子走直线（"爆开再合"的手感）
   float bulge = sin(e * 3.14159) * (0.10 + 0.22 * aRand.x) * uSpread;
   vec3 dir = normalize(p + vec3(0.0001, 0.0001, 0.0001));
-  p += dir * bulge;
+  // T52 / FIX_V5 §M 2:57「粉色爱心改为会跳动」：整颗心绕布局原点按脉搏缩放。
+  // uBeat 恒为 1.0 的段落，(p + dir * bulge) * 1.0 与改动前**逐位相同**（×1.0 是精确运算）。
+  p = (p + dir * bulge) * uBeat;
   // 常驻微动（纯函数：由 uTime 解析）
   p += vec3(
     sin(uTime * 0.7 + aRand.x * 6.28) * 0.012,
     cos(uTime * 0.6 + aRand.y * 6.28) * 0.012,
     sin(uTime * 0.5 + aRand.z * 6.28) * 0.012
   );
+  // T44 / FIX_V5 §D 0:51「转速加快」：旋涡绕**视线轴**自转（uSpin = 绝对角度，来自 SPIN 表）。
+  // 其它段落的 uSpin 恒为 0 → cos=1/sin=0，顶点输出与改动前逐位相同。
+  float cs = cos(uSpin);
+  float sn = sin(uSpin);
+  p.xy = mat2(cs, -sn, sn, cs) * p.xy;
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   float sz = uSize * (0.55 + 0.85 * aRand.y) * (1.0 + 0.35 * (1.0 - e));
   mv.xy += position.xy * sz;
@@ -620,6 +690,9 @@ export function createSwarm(opts = {}) {
       uTime: { value: 0 },
       uAlpha: { value: 0.95 },
       uSpread: { value: 1 },
+      uSpin: { value: 0 },
+      // T52 / FIX_V5 §M 2:57：心跳缩放（1 = 不跳；其它段落恒 1）
+      uBeat: { value: 1 },
       uAtlas: { value: atlas.texture },
       uAtlasGrid: { value: new THREE.Vector2(atlas.cols, atlas.rows) },
       uColorA: { value: new THREE.Color('#7fd8ff') },
@@ -656,11 +729,12 @@ export function createSwarm(opts = {}) {
 
   /**
    * @param {number} t
-   * @param {{camera?:THREE.Camera, alpha?:number, size?:number, spread?:number,
-   *          colorA?:number|string, colorB?:number|string, state?:object}} [o]
+   * @param {{camera?:THREE.Camera, alpha?:number, size?:number, spread?:number, spin?:number,
+   *          beat?:number, colorA?:number|string, colorB?:number|string, state?:object}} [o]
+   *   beat：T52 / §M 2:57 的心跳缩放（1 = 不跳）。恒 1 时顶点输出与改动前逐位相同。
    */
   function update(t, o = {}) {
-    const { camera = null, alpha = 0.85, size: sz = null, spread = 1, colorA = null, colorB = null } = o
+    const { camera = null, alpha = 0.85, size: sz = null, spread = 1, colorA = null, colorB = null, spin = 0, beat = 1 } = o
     const st = o.state || swarmStateAt(t)
     const pair = `${st.from}>${st.to}`
     if (pair !== curPair) {
@@ -677,6 +751,10 @@ export function createSwarm(opts = {}) {
     U.uTime.value = t
     U.uAlpha.value = alpha
     U.uSpread.value = spread
+    // T44：旋涡自转角（其它段落传 0）
+    U.uSpin.value = spin
+    // T52：心跳缩放（其它段落传 1）
+    U.uBeat.value = beat
     if (sz != null) U.uSize.value = sz
     // 桥接时更"炸"一点：错峰更宽
     U.uStagger.value = st.bridge ? 0.8 : 0.5

@@ -40,6 +40,13 @@ export function createHeartParticles(THREE, opts = {}) {
     sparkCount = 900,
     scale = 1,
     seed = 7,
+    // T52 / FIX_V5 §M 3:02 + 3:08：段 M 传 `whiteCore:false, lineOutline:false, solidInner:true`
+    //   —— 删掉白热核心点团与"中心的白色球"、删掉轮廓发光管（"平面线条心"），
+    //   改为同一父级下的**内层实体 3D 心**（与外壳同一条心形曲线、缩放 0.92）。
+    //   默认值保持与段 N（§1.14 要求"核心有白热光芯"+ 轮廓发光管）一致 ⇒ 段 N 不受影响。
+    whiteCore = true,
+    lineOutline = true,
+    solidInner = false,
   } = opts
   const grp = new THREE.Group()
   grp.name = 'heart3d'
@@ -90,58 +97,95 @@ export function createHeartParticles(THREE, opts = {}) {
   const shell = new THREE.Points(shellGeo, shellMat)
   grp.add(shell)
 
-  // ---------------- 白热核心：近白密点 + 发光球 ----------------
-  const corePos = new Float32Array(coreCount * 3)
-  for (let i = 0; i < coreCount; i++) {
-    const u = hash01(i, seed + 40) * Math.PI * 2
-    const v = Math.acos(2 * hash01(i, seed + 41) - 1)
-    const rr = 0.30 * Math.pow(hash01(i, seed + 42), 0.6)
-    corePos[i * 3] = Math.sin(v) * Math.cos(u) * rr * scale
-    corePos[i * 3 + 1] = Math.cos(v) * rr * 0.85 * scale
-    corePos[i * 3 + 2] = Math.sin(v) * Math.sin(u) * rr * scale
-  }
-  const coreGeo = new THREE.BufferGeometry()
-  coreGeo.setAttribute('position', new THREE.BufferAttribute(corePos, 3))
-  const coreMat = new THREE.PointsMaterial({
-    size: 0.013 * scale,
-    color: CORE_WHITE,
-    transparent: true,
-    opacity: 0.95,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    sizeAttenuation: true,
-  })
-  const core = new THREE.Points(coreGeo, coreMat)
-  grp.add(core)
+  // ---------------- 白热核心：近白密点 + 发光球（T52 / §M 3:02：段 M 关闭）----------------
+  let core = null
+  let coreMat = null
+  let coreGlow = null
+  let coreGlowMat = null
+  if (whiteCore) {
+    const corePos = new Float32Array(coreCount * 3)
+    for (let i = 0; i < coreCount; i++) {
+      const u = hash01(i, seed + 40) * Math.PI * 2
+      const v = Math.acos(2 * hash01(i, seed + 41) - 1)
+      const rr = 0.30 * Math.pow(hash01(i, seed + 42), 0.6)
+      corePos[i * 3] = Math.sin(v) * Math.cos(u) * rr * scale
+      corePos[i * 3 + 1] = Math.cos(v) * rr * 0.85 * scale
+      corePos[i * 3 + 2] = Math.sin(v) * Math.sin(u) * rr * scale
+    }
+    const coreGeo = new THREE.BufferGeometry()
+    coreGeo.setAttribute('position', new THREE.BufferAttribute(corePos, 3))
+    coreMat = new THREE.PointsMaterial({
+      size: 0.013 * scale,
+      color: CORE_WHITE,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+    })
+    core = new THREE.Points(coreGeo, coreMat)
+    grp.add(core)
 
-  const coreGlowMat = new THREE.MeshBasicMaterial({
-    color: 0xdff6ff,
-    transparent: true,
-    opacity: 0.5,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  })
-  const coreGlow = new THREE.Mesh(new THREE.SphereGeometry(0.16 * scale, 20, 14), coreGlowMat)
-  grp.add(coreGlow)
-
-  // ---------------- 轮廓：更亮的发光管 ----------------
-  const OUTLINE_N = 160
-  const pts = []
-  for (let i = 0; i < OUTLINE_N; i++) {
-    const u = (i / OUTLINE_N) * Math.PI * 2
-    const p = heartPoint(u)
-    pts.push(new THREE.Vector3(p.x * scale * 1.01, p.y * scale * 1.01, 0))
+    coreGlowMat = new THREE.MeshBasicMaterial({
+      color: 0xdff6ff,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+    coreGlow = new THREE.Mesh(new THREE.SphereGeometry(0.16 * scale, 20, 14), coreGlowMat)
+    grp.add(coreGlow)
   }
-  const outlineCurve = new THREE.CatmullRomCurve3(pts, true)
-  const outlineMat = new THREE.MeshBasicMaterial({
-    color: 0xcdf6ff,
-    transparent: true,
-    opacity: 0.9,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  })
-  const outline = new THREE.Mesh(new THREE.TubeGeometry(outlineCurve, 180, 0.012 * scale, 8, true), outlineMat)
-  grp.add(outline)
+
+  // ---------------- 轮廓：更亮的发光管（T52 / §M 3:02：段 M 关闭）----------------
+  let outline = null
+  let outlineMat = null
+  if (lineOutline) {
+    const OUTLINE_N = 160
+    const pts = []
+    for (let i = 0; i < OUTLINE_N; i++) {
+      const u = (i / OUTLINE_N) * Math.PI * 2
+      const p = heartPoint(u)
+      pts.push(new THREE.Vector3(p.x * scale * 1.01, p.y * scale * 1.01, 0))
+    }
+    const outlineCurve = new THREE.CatmullRomCurve3(pts, true)
+    outlineMat = new THREE.MeshBasicMaterial({
+      color: 0xcdf6ff,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+    outline = new THREE.Mesh(new THREE.TubeGeometry(outlineCurve, 180, 0.012 * scale, 8, true), outlineMat)
+    grp.add(outline)
+  }
+
+  // ---------------- T52 / FIX_V5 §M 3:02 + 3:08：内层实体 3D 心 ----------------
+  // 与外壳用**同一条心形参数曲线**（`heartPoint`）⇒ 同形；挂在同一父级 `grp` 下 ⇒ 同旋转；
+  // 用同一套坐标（都从 `heartPoint` 的原点出发、z 居中）⇒ 同心；`inner.scale = 0.92` ⇒ 3:08 的"内层缩放 0.92"。
+  let inner = null
+  let innerMat = null
+  if (solidInner) {
+    const NSEG = 144
+    const shape = new THREE.Shape()
+    for (let i = 0; i <= NSEG; i++) {
+      const p = heartPoint((i / NSEG) * Math.PI * 2)
+      if (i === 0) shape.moveTo(p.x * scale, p.y * scale)
+      else shape.lineTo(p.x * scale, p.y * scale)
+    }
+    const innerGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.42 * scale, bevelEnabled: false, steps: 1 })
+    // z 居中：外壳的厚度是对称的（`zr ∈ [-1,1]`），内层也居中才同心
+    innerGeo.translate(0, 0, -0.21 * scale)
+    innerMat = new THREE.MeshBasicMaterial({
+      color: 0x1a5f9e,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    })
+    inner = new THREE.Mesh(innerGeo, innerMat)
+    inner.scale.setScalar(0.92)
+    grp.add(inner)
+  }
 
   // ---------------- 心跳冲击波环（3 个复用，青 → 白）----------------
   const rings = []
@@ -191,6 +235,7 @@ export function createHeartParticles(THREE, opts = {}) {
     shell,
     core,
     outline,
+    inner,
     /**
      * @param {number} t
      * @param {{alpha?:number, beat?:number, scale?:number, spin?:number}} o
@@ -203,11 +248,18 @@ export function createHeartParticles(THREE, opts = {}) {
       grp.rotation.y = t * spin
       grp.scale.setScalar(s)
       shellMat.opacity = alpha
-      coreMat.opacity = 0.95 * alpha
+      if (coreMat) coreMat.opacity = 0.95 * alpha
       // 心跳时核心更白更亮
-      coreGlowMat.opacity = (0.42 + 0.5 * beat) * alpha
-      coreGlow.scale.setScalar(1 + 0.22 * beat)
-      outlineMat.opacity = (0.75 + 0.25 * (1 - beat)) * alpha
+      if (coreGlowMat) {
+        coreGlowMat.opacity = (0.42 + 0.5 * beat) * alpha
+        coreGlow.scale.setScalar(1 + 0.22 * beat)
+      }
+      if (outlineMat) outlineMat.opacity = (0.75 + 0.25 * (1 - beat)) * alpha
+      // T52 / §M 3:08：内层实体心与外层壳同父级 ⇒ 同旋转；0.92 是相对外壳的缩放
+      if (innerMat) {
+        innerMat.opacity = 0.92 * alpha
+        inner.scale.setScalar(0.92 * (1 + 0.05 * beat))
+      }
       sparkMat.opacity = 0.65 * alpha
 
       // 冲击波环：三个错相扩散，峰值由青转白

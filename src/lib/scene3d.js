@@ -28,6 +28,10 @@ export function createLightRigSafe(opts) {
  * 1) 文字 → 3D 面片
  * ------------------------------------------------------------------ */
 
+/** §G3 逐实例唯一的命名序号（textPlane / glowTube 共用同一套计数器思路）。 */
+let textPlaneSeq = 0
+let glowTubeSeq = 0
+
 /**
  * 把一段文字画到 canvas 贴图，并返回一个**按世界单位定尺寸**的平面。
  * 字号守卫：`role` 决定下限；canvas 里的 px 值按 (worldHeight / TEXT_REF_UNITS) 反算，
@@ -36,8 +40,9 @@ export function createLightRigSafe(opts) {
  * @param {string} str
  * @param {{role?:string, color?:string, weight?:number, family?:string,
  *          height?:number, pad?:number, align?:string, letterSpacing?:number,
- *          bg?:string|null, opacity?:number, glow?:number, mono?:boolean}} [o]
+ *          bg?:string|null, opacity?:number, glow?:number, mono?:boolean, name?:string}} [o]
  *          height: 世界单位的文字高度（= 一行字的高度，不含留白）
+ *          name: 覆盖网格名（默认 `textPlane:<前 18 字>#<实例序号>`，§G3 要求逐实例唯一）
  * @returns {{mesh:THREE.Mesh, texture:THREE.CanvasTexture, width:number, height:number,
  *            setText:Function, dispose:Function}}
  */
@@ -133,7 +138,10 @@ export function textPlane(str, o = {}) {
     blending: glow > 0 ? THREE.AdditiveBlending : THREE.NormalBlending,
   })
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(worldW, worldH), mat)
-  mesh.name = `textPlane:${str.slice(0, 18)}`
+  // T42 / FIX_V5 §G3：名字必须**逐实例唯一**。同一段文案（标题的 3 层视差板、年份环的 10 块标签…）
+  // 会造出多个面片，旧的 `textPlane:${str}` 让它们同名 → 「按对象名统计重名主体」的自检会误报。
+  // 名字仍保留可读前缀，另加实例序号；调用方可用 `o.name` 显式覆盖。
+  mesh.name = o.name || `textPlane:${str.slice(0, 18)}#${++textPlaneSeq}`
   mesh.userData.isTextPlane = true
 
   return {
@@ -308,7 +316,7 @@ export function voxelField(o = {}) {
 /**
  * 由一组 [x,y] 采样点生成一条发光管（用 TubeGeometry，粗细可控、有厚度）。
  * @param {number[][]} pts 世界坐标 [[x,y,z], ...]
- * @param {{radius?:number, color?:number, glow?:boolean, tubular?:number}} [o]
+ * @param {{radius?:number, color?:number, glow?:boolean, tubular?:number, name?:string}} [o]
  */
 export function glowTube(pts, o = {}) {
   const { radius = 0.012, color = 0x7fd8ff, glow = true, tubular = 220 } = o
@@ -330,7 +338,8 @@ export function glowTube(pts, o = {}) {
     depthWrite: false,
   })
   const mesh = new THREE.Mesh(tube, mat)
-  mesh.name = 'glowTube'
+  // T42 / §G3：逐实例唯一名（同段可能有多条光弧），调用方可用 `o.name` 覆盖。
+  mesh.name = o.name || `glowTube#${++glowTubeSeq}`
   return {
     object: mesh,
     material: mat,

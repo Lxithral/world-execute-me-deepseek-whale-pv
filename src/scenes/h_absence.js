@@ -1,15 +1,18 @@
 // src/scenes/h_absence.js — 段 H 1:43.5–1:58.3 补全与缺席
 // DIRECTOR：1:44.5「你」的键入波形（取本曲真实频谱作为震动）驱动画面；1:48.2 灰色幽灵补全文本
 // 被按 Tab 接受（「补全」双关）；1:50.9–1:56.0 五次「离开」对应重连横幅 1/5…5/5，逐次递进：
-//   ①对方头像灰掉 ②输入框光标停止闪烁 ③「上次活动 N 分钟前」计时跳动
+//   ①对方头像灰掉 ②输入框光标停止闪烁 ③短报错（T48 §H 1:53：原「上次活动 N 分钟前」计时已删）
 //   ④她表情转 sad 并垂下视线 ⑤整扇窗口变灰，只剩错误码
 // 1:56.0 孤立：全部熄灭，只剩一枚像素光标与处于暗圈里的 sad 立绘。
+// T48（FIX_V5 §H 1:51/1:53/1:57）：两块终端屏一律锚在**左带**（立绘恒占右带 0.591–0.909），
+// 上屏字号做到 30–40px；舞台标注（波形说明/重连横幅）也全部移进左带与 G5 安全区。
 
 import * as THREE from 'three'
 import { C, rgba, mixHex } from '../core/palette.js'
 import { clamp, span, smoothstep, TAU, outCubic } from '../core/ease.js'
 import { hash01 } from '../core/rng.js'
 import { MONO, panel, bubble, reconnectBanner, roundRect, wrapText } from '../ui/dsh.js'
+import { beginPanel, endPanel } from '../ui/text.js'
 import { typed, cursorOn } from '../ui/typing.js'
 import { createTermPane } from '../lib/props/termpane.js'
 import { createMonitor } from '../lib/props/monitor.js'
@@ -30,6 +33,33 @@ const ISO_LINE = (() => {
   return hit ? hit.text : 'idle · peer offline · waiting…'
 })()
 const GHOST = 'and i will keep the last request, unchanged, forever'
+
+const _hv = new THREE.Vector3()
+
+/**
+ * T48（FIX_V5 §H 1:51 / 1:57）：把一块 Monitor 锚在**屏幕左缘**（默认留白 28px）。
+ *
+ * 为什么非要锚左缘：G1 第 9 行写「终端面板永远不遮挡也不被立绘遮挡，**立绘出场时同侧不放面板**」，
+ * 而段 H 的立绘恒占**右带** x 0.591–0.909（`src/whale/sprite.js:127 standRect`）。
+ * 实测原状两块屏各坏在一处：
+ *   · 右带 completion 屏（§H 1:51）：`cam.x + 0.86*halfW0` ⇒ 整块压在立绘身上，且上屏字号只有 15.7px；
+ *   · 左带 isolation 屏（§H 1:57）：`cam.x - 0.85` ⇒ 左缘出画 294px（就是用户说的"左侧黑框模糊看不清"）。
+ * 做法与 T46 在段 F 验证过的同一套：先摆一个近似位，把它投影到 NDC，再用一步线性修正
+ * 把**左缘**对到 margin 上（相机有横移/偏航时单步修正已足够，且这里逐帧执行）。
+ * @returns {number} 该帧左缘目标所在的 NDC x（供 metrics 记录）
+ */
+function placePaneLeft(mon, pane, ctx, W, { margin = 28, dy = 0, dist = 2.8 } = {}) {
+  const cam = ctx.three.camera
+  const halfH = dist * Math.tan(((cam.fov || 40) * Math.PI) / 180 / 2)
+  const halfW = halfH * (cam.aspect || 16 / 9)
+  const paneW = (pane.width || 0.96) * (mon.object.scale.x || 1)
+  const target = -1 + (2 * margin) / W + (paneW * 0.5) / halfW
+  _hv.set(cam.position.x, cam.position.y + dy, cam.position.z - dist)
+  mon.object.position.copy(_hv)
+  _hv.project(cam)
+  if (Number.isFinite(_hv.x)) mon.object.position.x += (target - _hv.x) * halfW
+  return target
+}
 
 export default {
   id: 'H',
@@ -56,11 +86,12 @@ export default {
   /**
    * §2.3 明写 Monitor「用于段 B 展馆、**H**、J 背景」。
    * 这里在 isolation 窗口用一块终端屏给出 §3 的 `idle · peer offline · waiting…`。
-   * 屏的尺寸取 0.63 世界单位：在相机前方 1.6 单位处约 248px 宽（12.9% 画面宽、
-   * 单块面积约 2.9%），远低于 §2.4 的 22% 上限。
+   * 屏的尺寸取 0.63 世界单位；T48 起整机 scale 1.15 且由 `placePaneLeft()` 锚在屏幕左缘 28px：
+   * 实测（117.3）左缘 0.022 / 右缘 0.204（18.2% 画面宽）、y 0.327–0.577（高 25%），
+   * 单块面积 ≈4.6%，远低于 §2.4 的 22% 上限，上屏字号 37.1px（G1 的 30–40px）。
    */
   init(ctx) {
-    this.pane = createTermPane({ session: '#001', side: 'L' })
+    this.pane = createTermPane({ session: '#001', side: 'L', maxWinW: 520 })
     this.monitor = createMonitor({
       pane: this.pane,
       width: 0.63,
@@ -70,18 +101,24 @@ export default {
       seg: 'H',
       anchor: 'isolation', // §4.2：非 decor 的登记对象必须带锚点
     })
+    // T48（§H 1:57）：整机放大 1.15 ⇒ 30.9px 逻辑字上屏 ≈35.5px（G1 的 30–40px），
+    // 位置改由 `placePaneLeft()` 锚在屏幕左缘 28px（原先左缘出画 294px）。
+    this.monitor.object.scale.setScalar(1.15)
     this.monitor.object.visible = false
     this.paneRec = null
     if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.monitor.object)
     if (ctx.stageRoles) this.paneRec = this.monitor.registerWith(ctx.stageRoles)
 
     /* ---- T21b：`completion` 的**终端屏幽灵补全**（§7 H「completion 用终端屏的幽灵补全」+ §3）----
-     * 右带一块终端屏：`我今天…`（you，110.202 = completion 锚点）→ +0.4s 出现灰色幽灵行
-     * `…想见你。⇥ Tab`（kind:'ghost' ⇒ 灰 #6f7680）→ 按 Tab 后**变白**（kind 切成 'deepseek' ⇒ #e8eaee）。
-     * 旧实现是一行**英文**裸文字画在 2D 画布上（26px、且从 107.6 就开始 —— 比 `completion` 锚点早 2.6s），
-     * 既不是 §3 的台词、也没有终端屏，本项整块替换。
+     * 一块终端屏：`today i…`（you，110.202 = completion 锚点）→ +0.4s 出现灰色幽灵行
+     * `…wanted to see you.⇥ Tab`（kind:'ghost' ⇒ 灰 #6f7680）→ 按 Tab 后**变白**（kind 切成 'deepseek'）。
+     * T48 改两处（FIX_V5 §H 1:51 + G1 第 9 行 + G2）：
+     *   ① **挪到左带**（原 `cam.x + 0.86*halfW0` 压在立绘身上，立绘恒占右带 0.591–0.909）；
+     *      整机放大 2.2 让 34px 逻辑字上屏 ≈34.5px（原 15.7px ⇒ 用户说的"右侧窗口看不清"）；
+     *   ② 文本改由 `dialogueOf('H')` 的 `completion` 两行驱动（原先硬编码中文 `我今天…`/`…想见你。`，
+     *      违反 G2「除歌词层外不得出现刻意的中文」）。
      */
-    this.cPane = createTermPane({ session: '#001', side: 'R' })
+    this.cPane = createTermPane({ session: '#001', side: 'L', maxWinW: 560 })
     this.cMon = createMonitor({
       pane: this.cPane,
       width: 0.9,
@@ -91,6 +128,7 @@ export default {
       seg: 'H',
       anchor: 'completion',
     })
+    this.cMon.object.scale.setScalar(2.2)
     this.cMon.object.visible = false
     this.cRec = null
     if (ctx.three && ctx.three.stage3d) ctx.three.stage3d.add(this.cMon.object)
@@ -322,29 +360,32 @@ export default {
       drawTypingWave(g, ctx, t, waveA, spec)
     }
 
-    // ---- T21b：`completion` 的终端屏幽灵补全（§7 H + §3；旧的那行英文 2D 裸文字已删除） ----
+    // ---- T21b/T48：`completion` 的终端屏幽灵补全（§7 H + §3；文本来自 dialogue.js，G2） ----
     const tComp = ctx.cues.sec('H', 'completion', 110.202)
     if (this.cPane) {
       const cIn = clamp(span(t, tComp - 0.5, tComp + 0.1))
       const cOut = 1 - clamp(span(t, tComp + 1.25, tComp + 1.62))
       const cA = cIn * cOut
       const accepted = t >= tComp + 1.0 // §3「按 Tab 后变白」
-      const rows = [{ kind: 'you', text: '我今天…' }]
-      if (t >= tComp + 0.4) rows.push({ kind: accepted ? 'deepseek' : 'ghost', text: accepted ? '…想见你。' : '…想见你。⇥ Tab' })
+      // §2.6：终端内容一律由 dialogue.js 驱动（原先是硬编码中文两行）
+      const defs = this.cRows || (this.cRows = dialogueOf('H').filter((d) => d.anchor === 'completion'))
+      const rows = defs
+        .filter((d) => t >= tComp + (d.offset || 0))
+        .map((d) => {
+          const on = accepted && d.ghost === true
+          return { kind: on ? 'deepseek' : d.kind, text: on ? d.text.replace(/⇥ Tab$/, '') : d.text }
+        })
       const key = rows.map((r) => r.kind + r.text).join('|')
       if (key !== this.lastCKey) {
         this.lastCKey = key
         this.cPane.setLines(rows.slice(0, 7), { session: '#001', subtitle: '' })
       }
-      const cam0 = ctx.three.camera
-      const d0 = 2.8
-      const halfH0 = d0 * Math.tan(((cam0.fov || 40) * Math.PI) / 180 / 2)
-      const halfW0 = halfH0 * (cam0.aspect || 16 / 9)
-      this.cMon.object.position.set(cam0.position.x + 0.86 * halfW0, cam0.position.y, cam0.position.z - d0)
+      // T48（§H 1:51 + G1 第 9 行）：锚在屏幕左缘 28px（立绘在右带 ⇒ 同侧不放面板）
+      const cNx = placePaneLeft(this.cMon, this.cPane, ctx, W, { margin: 28, dist: 2.8 })
       this.cPane.tick(t, { appearAt: tComp - 0.5, parallax: { x: 0, y: 0 }, glitch: 0 })
       this.cPane.flush()
       this.cMon.object.visible = cA > 0.01
-      this.metrics.completion = { t: +tComp.toFixed(3), accepted, rows: rows.length, a: +cA.toFixed(2) }
+      this.metrics.completion = { t: +tComp.toFixed(3), accepted, rows: rows.length, a: +cA.toFixed(2), nx: +cNx.toFixed(3) }
     }
 
     // ---- 五次「离开」：重连横幅 + 逐次递进（时刻来自锚点表） ----
@@ -407,19 +448,19 @@ export default {
     //      几乎没有硬边。终端屏的标题栏/2px 描边/等宽字正好补上密度，
     //      而且是 DIRECTOR 要的"孤立"感（远处一块还亮着的屏）而不是堆内容。
     if (this.pane) {
-      const cam = ctx.three.camera
       const isoA = span(t, 116.2, 116.9) * (1 - span(t, 118.0, 118.5))
       const rec = this.paneRec
       if (rec) rec.alpha = isoA
       this.monitor.object.visible = isoA > 0.01
       if (isoA > 0.01) {
-        // 左带、比相机远 1.6 单位（§2.4：终端屏只能在左右侧带与远景）
-        this.monitor.object.position.set(cam.position.x - 0.85, cam.position.y + 0.05, cam.position.z - 1.6)
-        this.monitor.object.rotation.y = 0.22
         if (!this._isoSet) {
           this.pane.setLines([{ kind: 'tool', text: ISO_LINE }], { session: '#001', subtitle: '' })
           this._isoSet = true
         }
+        // T48（§H 1:57）：原先 `cam.x - 0.85` 让左缘出画 294px（"左侧黑框模糊看不清"）
+        // ⇒ 改成**屏幕左缘 28px 锚定**；比相机远 1.6 单位（§2.4：终端屏只能在左右侧带与远景）。
+        const isoNx = placePaneLeft(this.monitor, this.pane, ctx, W, { margin: 28, dy: 0.05, dist: 1.6 })
+        this.monitor.object.rotation.y = 0.04 // FIX_V5 §G1：面板倾斜 ≤6°，基准角预算 ≤0.04rad
         this.pane.tick(t, {
           appearAt: 116.2,
           fadeAt: 118.0,
@@ -429,6 +470,7 @@ export default {
         })
         this.pane.setCaret(Math.sin(t * 3.4) > 0)
         this.pane.flush()
+        this.metrics.iso = { a: +isoA.toFixed(2), nx: +isoNx.toFixed(3) }
       }
     }
 
@@ -475,17 +517,24 @@ function drawTypingWave(g, ctx, t, a, spec) {
     g.fillStyle = rgba(C.cyan, 0.25 + hash01(gi * 40 + i, 62) * 0.4)
     g.fillRect(60 + i * 22, H * 0.86 - h, 12, h)
   }
-  g.font = MONO(12, 500)
+  // T48（§H 1:57 连带）：这行说明文字原来画在 (60, H*0.90) —— x 0.031 / y 0.891 **两条都越 G5**
+  // （G5：所有舞台文字 x∈[5%,95%]、y∈[8%,80%]），是全片 g5 最早越界点（106.4s）的唯一来源。
+  // 移到左上角安全区（x 0.06W / y 0.13H），字号 12 → 34px（与段内其它舞台标注同级）。
+  g.font = MONO(34, 500)
   g.fillStyle = rgba(C.fgDim, 0.8)
   g.textAlign = 'left'
-  g.fillText('input waveform · real spectrum', 60, H * 0.90)
+  g.textBaseline = 'alphabetic'
+  g.fillText('input waveform · real spectrum', Math.round(W * 0.06), Math.round(H * 0.13))
   g.restore()
 }
 
 /* 每一次「离开」的不同失败方式（逐次递进） */
 function drawAttempt(g, ctx, t, k, a, t0) {
   const { W, H } = ctx
-  const x = W * 0.52
+  // T48（FIX_V5 §H 1:53 + G1 第 9 行）：横幅原来从 `W*0.52` 起（实测文字盒 x 0.533–0.724），
+  // **整条压在立绘身上**（立绘 x 0.591–0.909）。段 H 立绘全程在场 ⇒ 面板不得与她同侧，
+  // 移到左带 x = 0.07W（横幅宽 520px ⇒ 右缘 0.34，仍远离立绘）。
+  const x = W * 0.07
   // ⚠️ T21a 修：原来是 `H * 0.16 + k * 0.0` —— **那个 `* 0.0` 让五条横幅全部落在同一个 (x,y)**，
   // 于是相邻两条在交叉淡入时文字盒完全重合（实测 t=112.8/112.9 的 IoU = **1.0**，
   // 114.7 还连带把 "last active 66 minutes" 与 "her gaze drops." 压在一起 IoU 0.349）。
@@ -508,58 +557,57 @@ function drawAttempt(g, ctx, t, k, a, t0) {
     g.beginPath()
     g.arc(x + 40, y + 118, 20, Math.PI, 0)
     g.fill()
-    g.font = MONO(12, 600)
+    g.font = MONO(34, 600)
     g.fillStyle = rgba(C.fgDim, 0.7)
     g.textAlign = 'left'
-    g.fillText('peer: grayed out', x + 76, y + 116)
+    g.textBaseline = 'middle'
+    g.fillText('peer: grayed out', x + 76, y + 140)
     g.restore()
   } else if (k === 1) {
     // ② 输入框光标停止闪烁
     g.save()
     g.globalAlpha = a
-    roundRect(g, x, y + 74, 420, 44, 6)
+    roundRect(g, x, y + 74, 420, 56, 6)
     g.fillStyle = 'rgba(16,18,22,0.9)'
     g.fill()
     g.strokeStyle = rgba(C.line, 0.8)
     g.stroke()
-    g.font = MONO(17, 500)
+    g.font = MONO(34, 500)
     g.fillStyle = rgba(C.fgDim, 0.75)
     g.textAlign = 'left'
     g.textBaseline = 'middle'
-    g.fillText('> ', x + 14, y + 96)
+    g.fillText('> ', x + 24, y + 102)
     // 光标冻结（不再闪烁）
     g.fillStyle = rgba(C.fgDim, 0.5)
-    g.fillRect(x + 40, y + 84, 9, 24)
-    g.font = MONO(12, 600)
+    g.fillRect(x + 62, y + 84, 9, 32)
+    g.font = MONO(34, 600)
     g.fillStyle = C.amber
-    g.fillText('caret: frozen', x + 350, y + 150)
+    g.fillText('caret: frozen', x + 350, y + 156)
     g.restore()
   } else if (k === 2) {
-    // ③「上次活动 N 分钟前」计时跳动
+    // ③ T48（FIX_V5 §H 1:53）：原来这条画的是「last active N minutes ago」+「(timer still counting)」，
+    // 用户点名删除 —— 那套"计时还在跳"读起来像"她还在"，而这一拍要的是**连接已经断了**。
+    // 换成一条短报错（与 dialogue.js 的 left3 行同步改成 `reconnect 3/5 · ack timeout`）。
     g.save()
     g.globalAlpha = a
-    const mins = 12 + Math.floor((t - t0) * 37) + k * 9
-    g.font = MONO(18, 700)
-    g.fillStyle = C.amber
+    g.font = MONO(34, 700)
+    g.fillStyle = C.red
     g.textAlign = 'left'
     g.textBaseline = 'middle'
-    g.fillText(`last active ${mins} minutes ago`, x, y + 96)
-    g.font = MONO(12, 500)
-    g.fillStyle = rgba(C.fgDim, 0.7)
-    g.fillText('(timer still counting)', x, y + 122)
+    g.fillText('reconnect 3/5 · ack timeout', x, y + 96)
     g.restore()
   } else if (k === 3) {
     // ④ 她表情转 sad 并垂下视线（立绘侧由 expr 处理，这里给标注）
     g.save()
     g.globalAlpha = a
-    g.font = MONO(14, 600)
+    g.font = MONO(34, 600)
     g.fillStyle = C.teal
     g.textAlign = 'left'
     g.textBaseline = 'middle'
-    g.fillText('her gaze drops.', x, y + 96)
+    g.fillText('her gaze drops.', x, y + 100)
     g.strokeStyle = rgba(C.teal, 0.6)
     g.beginPath()
-    g.moveTo(x + 150, y + 96)
+    g.moveTo(x + 300, y + 100)
     g.lineTo(W * 0.80, H * 0.34)
     g.stroke()
     g.restore()
@@ -570,21 +618,25 @@ function drawAttempt(g, ctx, t, k, a, t0) {
     const wx = x - 30
     const wy = y + 60
     const ww = 520
-    const wh = 220
+    // T41（FIX_V5 §G1）：这块灰窗是面板 → 进审计作用域，正文 30–40px（原 13/22px），
+    // 高度按 34px 行高重算（4 行假数据 + 错误码），并把文字留在 24px 内边距里。
+    const wh = 300
     roundRect(g, wx, wy, ww, wh, 8)
     g.fillStyle = 'rgba(40,42,48,0.92)'
     g.fill()
     g.strokeStyle = rgba(C.fgDim, 0.35)
     g.lineWidth = 1
     g.stroke()
-    g.font = MONO(13, 500)
+    beginPanel(g, { x: wx, y: wy, w: ww, h: wh }, { pad: 24, id: 'connReset' })
+    g.font = MONO(34, 500)
     g.fillStyle = rgba(C.fgDim, 0.5)
     g.textAlign = 'left'
     g.textBaseline = 'top'
-    ;['——', '——', '——————', '——'].forEach((s, i) => g.fillText(s, wx + 20, wy + 30 + i * 26))
-    g.font = MONO(22, 700)
+    ;['——', '——', '——————', '——'].forEach((s, i) => g.fillText(s, wx + 24, wy + 28 + i * 40))
+    g.font = MONO(34, 700)
     g.fillStyle = C.red
-    g.fillText('E_CONN_RESET 1006', wx + 20, wy + wh - 52)
+    g.fillText('E_CONN_RESET 1006', wx + 24, wy + wh - 76)
+    endPanel(g)
     g.restore()
   }
   g.restore()

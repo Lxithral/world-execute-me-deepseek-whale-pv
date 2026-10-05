@@ -82,7 +82,7 @@ export default {
       })
       monitor.object.position.set(spec.x - monitor.width * 0.0, spec.y, spec.z)
       // 右侧带的屏朝左转一点，做出"围着她"的取景（§2.5 的视差也靠这个放大）
-      monitor.object.rotation.y = spec.side === 'R' ? -0.22 : 0.22
+      monitor.object.rotation.y = spec.side === 'R' ? -0.04 : 0.04 // FIX_V5 §G1：倾斜 ≤6°，基准角预算 ≤0.04rad
       monitor.object.name = `segPANE:${spec.id}`
       // 登记进 §2.4 的角色表；anchor 用真实存在的锚点 key（§4.2：除 decor 外必须有锚点）
       const rec = monitor.registerWith(ctx.stageRoles)
@@ -173,7 +173,7 @@ export default {
         base.y + p.pane.drift.y,
         base.z + p.pane.drift.z - p.pane.pushBack()
       )
-      p.monitor.object.rotation.y = (base.side === 'R' ? -0.22 : 0.22) + p.pane.drift.rotY
+      p.monitor.object.rotation.y = (base.side === 'R' ? -0.04 : 0.04) + p.pane.drift.rotY
       p.monitor.object.rotation.x = p.pane.drift.rotX
       p.monitor.object.visible = p.pane.visible
       p.pane.setCaret(Math.sin(t * 3.4) > 0)

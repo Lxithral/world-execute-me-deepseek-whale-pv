@@ -4,7 +4,8 @@
 //             用于段 B 展馆、H、J 背景。」
 //
 // 它和 TermPane 的分工：
-//   · TermPane（`termpane.js`）负责**内容**：1024×640 canvas、逐行排字、7 行、光标。
+//   · TermPane（`termpane.js`）负责**内容**：2048×1280 canvas（逻辑 1024×640）、逐行排字、窗口
+//     尺寸由内容决定（FIX_V5 §G1）、光标。
 //   · Monitor（本文件）负责**外壳**：圆角盒机身、屏面把 TermPane 的 mesh 收进来、
 //     玻璃反光、边缘泛光、可选底座。
 // 于是"一块屏"= createTermPane() + createMonitor({ pane })；画面里想放几块就建几块，
@@ -13,6 +14,11 @@
 // 深度纪律（§2.4）：整机是 pane —— depthWrite 关、depthTest 开、renderOrder < 0，
 // 于是它一定会被写深度的主角挡住。外壳自身的机身是**不透明**的（否则半透明机身会把
 // 后面的东西透出来、看着像"重影"），只有泛光片是半透明的。
+//
+// ⚠️ FIX_V5 §G1：TermPane 的窗口尺寸是**内容驱动**的（内容 + 两侧 24px 内边距），会随台词
+// 长短变化。因此机身、玻璃、泛光、底座都必须跟着重建 —— 由 `fit()` 完成，并挂在
+// `pane.onResize` 上。外壳宽度上限 = 调用点写死的 `width`（构图不变），
+// 内容更窄时机身随之收窄（屏面永远填满玻璃，不会出现"小屏浮在大框里"）。
 
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
@@ -43,27 +49,27 @@ export function createMonitor(opts = {}) {
   const grp = new THREE.Group()
   grp.name = `monitor:${tag}`
 
-  // 屏面比例：优先用 TermPane 的（1024×640 = 1.6），否则 16:10
-  const aspect = pane ? pane.width / pane.height : 1.6
-  const screenH = width / aspect
-  const bezel = Math.max(0.012, width * 0.022)
-  const bodyW = width + bezel * 2
-  const bodyH = screenH + bezel * 2
-  const bodyD = shell === 'crt' ? width * 0.42 : width * 0.05
+  /** 调用点授权的最大机身宽（G1：外壳只许"放大到刚好装下文字"，不许超过构图授权） */
+  const capW = width
+  /** pane 的初始世界尺寸（TermPane 首帧前是 0.96×0.6）
+   *  ⚠️ 必须读 `pane.width` / `pane.height`（取值器，实时值）。TermPane **不暴露**
+   *  `worldW`/`worldH` 属性 —— 写 `pane.worldW` 永远是 `undefined`，于是机身被锁在
+   *  0.96×0.6 的初值上、从不跟随内容窗口，屏幕上就是「小屏浮在大框里」（G1 违规）。 */
+  const initW = pane ? (pane.width || 0.96) : width
+  const initH = pane ? (pane.height || width / 1.6) : width / 1.6
 
-  /* ---------- 机身：圆角盒 ---------- */
-  const radius = Math.min(bodyW, bodyH) * 0.06
-  const bodyGeo = new RoundedBoxGeometry(bodyW, bodyH, bodyD, 3, radius)
+  let bodyW = 0
+  let bodyH = 0
+  let bezelNow = Math.max(0.012, width * 0.022)
+
+  /* ---------- 机身：圆角盒（几何在 fit() 里按内容重建） ---------- */
   const bodyMat = new THREE.MeshStandardMaterial({
     color: bodyColor,
     roughness: shell === 'crt' ? 0.62 : 0.42,
     metalness: shell === 'crt' ? 0.18 : 0.55,
   })
-  const body = new THREE.Mesh(bodyGeo, bodyMat)
+  const body = new THREE.Mesh(new RoundedBoxGeometry(initW, initH, width * 0.05, 3, initW * 0.06), bodyMat)
   body.name = `${tag}:body`
-  body.position.z = -bodyD / 2
-  // 机身不透明 → 写深度（§2.4 的"主角必须不透明或写深度"是给 hero 的，
-  // 但 pane 的机身同样应当参与深度，否则同一块屏的玻璃与屏面会互相穿）
   grp.add(body)
 
   /* ---------- 屏面：把 TermPane 的 mesh 收进来 ---------- */
@@ -77,7 +83,7 @@ export function createMonitor(opts = {}) {
   } else {
     // 没有 TermPane 时给一块纯色屏（用于"关机/无信号"的显示器）
     screenMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(width, screenH),
+      new THREE.PlaneGeometry(initW, initH),
       new THREE.MeshBasicMaterial({ color: 0x0a0c10, transparent: true, opacity: 0.9, depthWrite: false, depthTest: true })
     )
     screenMesh.name = `${tag}:screen`
@@ -104,7 +110,7 @@ export function createMonitor(opts = {}) {
     const tex = new THREE.CanvasTexture(cv)
     tex.colorSpace = THREE.SRGBColorSpace
     glareMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(width, screenH),
+      new THREE.PlaneGeometry(initW, initH),
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.5, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending })
     )
     glareMesh.name = `${tag}:glare`
@@ -129,7 +135,7 @@ export function createMonitor(opts = {}) {
     const tex = new THREE.CanvasTexture(cv)
     tex.colorSpace = THREE.SRGBColorSpace
     glowMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(bodyW * 1.5, bodyH * 1.6),
+      new THREE.PlaneGeometry(initW * 1.5, initH * 1.6),
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: glow, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending })
     )
     glowMesh.name = `${tag}:glow`
@@ -140,22 +146,55 @@ export function createMonitor(opts = {}) {
 
   /* ---------- CRT 底座 ---------- */
   let stand = null
+  let neck = null
+  let foot = null
   if (shell === 'crt') {
     stand = new THREE.Group()
     stand.name = `${tag}:stand`
-    const neck = new THREE.Mesh(
-      new THREE.CylinderGeometry(width * 0.10, width * 0.13, screenH * 0.16, 16),
-      bodyMat
-    )
-    neck.position.y = -bodyH / 2 - screenH * 0.08
-    const foot = new THREE.Mesh(
-      new RoundedBoxGeometry(width * 0.52, screenH * 0.05, bodyD * 0.9, 2, screenH * 0.02),
-      bodyMat
-    )
-    foot.position.y = -bodyH / 2 - screenH * 0.16
-    foot.position.z = bodyD * 0.05
+    neck = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 16), bodyMat)
+    foot = new THREE.Mesh(new RoundedBoxGeometry(1, 1, 1, 2, 0.02), bodyMat)
     stand.add(neck, foot)
     grp.add(stand)
+  }
+
+  /** 换几何：旧的要 dispose，否则每次改台词都漏一份 GPU buffer */
+  function swap(mesh, geo, z) {
+    if (!mesh) return
+    if (mesh.geometry) mesh.geometry.dispose()
+    mesh.geometry = geo
+    if (z !== undefined) mesh.position.z = z
+  }
+
+  /**
+   * FIX_V5 §G1：按「内容决定的屏面尺寸」重建外壳。
+   * 机身宽 = min(构图授权 capW, 屏面宽) + 两侧 bezel；屏面永远填满玻璃。
+   */
+  function fit() {
+    // ⚠️ `pane.width` / `pane.height` 是取值器（TermPane 没有 worldW/worldH 属性）
+    const pw = pane ? Math.max(0.05, pane.width || initW) : initW
+    const ph = pane ? Math.max(0.04, pane.height || initH) : initH
+    const shellW = Math.min(capW, pw)
+    const bz = Math.max(0.012, shellW * 0.022)
+    const w = shellW + bz * 2
+    const h = ph + bz * 2
+    if (Math.abs(w - bodyW) < 1e-4 && Math.abs(h - bodyH) < 1e-4) return
+    bodyW = w
+    bodyH = h
+    bezelNow = bz
+    const d = shell === 'crt' ? w * 0.42 : w * 0.05
+    swap(body, new RoundedBoxGeometry(w, h, d, 3, Math.min(w, h) * 0.06), -d / 2)
+    swap(glareMesh, new THREE.PlaneGeometry(shellW, ph))
+    swap(glowMesh, new THREE.PlaneGeometry(w * 1.5, h * 1.6))
+    if (!pane) swap(screenMesh, new THREE.PlaneGeometry(shellW, ph))
+    if (stand && neck && foot) {
+      const rN = shellW * 0.10
+      const rN2 = shellW * 0.13
+      swap(neck, new THREE.CylinderGeometry(rN, rN2, ph * 0.16, 16))
+      neck.position.y = -h / 2 - ph * 0.08
+      swap(foot, new RoundedBoxGeometry(shellW * 0.52, ph * 0.05, d * 0.9, 2, Math.max(0.005, ph * 0.02)))
+      foot.position.y = -h / 2 - ph * 0.16
+      foot.position.z = d * 0.05
+    }
   }
 
   grp.userData.role = role
@@ -170,8 +209,6 @@ export function createMonitor(opts = {}) {
     //   2) §2.4 的材质纪律（depthTest 开 / depthWrite 关 / renderOrder<0）只对**屏面**成立。
     //      机身（`RoundedBoxGeometry` 的不透明外壳）本来就该写深度 —— 一台显示器是实体；
     //      "它挡不住主角"这件事由「pane 必须比 hero 更远」那条规则保证，不靠禁止机身写深度。
-    // 早先登记整机时，`stage_roles.check()` 会把机身的 MeshStandardMaterial 也按屏面纪律判，
-    // 于是 ?demo=panes 每次都报 3×`pane-material` —— 那是**判据用错了对象**，不是画面有问题。
     rec = roles.register(screenMesh, {
       role,
       seg,
@@ -184,18 +221,31 @@ export function createMonitor(opts = {}) {
     return rec
   }
 
+  // G1：内容改尺寸 → 外壳跟着重建（`onResize` 目前没有别的消费者，见 grep）
+  if (pane) pane.onResize = () => fit()
+  fit()
+
   return {
     object: grp,
     body,
     screenMesh,
     stand,
-    width,
-    height: screenH,
-    bezel,
+    /** 机身宽（内容驱动，随 fit() 变化） */
+    get width() {
+      return bodyW || capW
+    },
+    /** 屏面高（内容驱动） */
+    get height() {
+      return bodyH || initH
+    },
+    get bezel() {
+      return bezelNow
+    },
     shell,
     role,
     /** 屏面 4 角的世界坐标（供覆盖率/遮挡的几何判据） */
     registerWith,
+    fit,
     get record() {
       return rec
     },
@@ -206,12 +256,13 @@ export function createMonitor(opts = {}) {
     },
     /** 供自检：这块屏确实是"圆角盒 + 屏面贴 TermPane 纹理 + 微弱泛光" */
     report() {
+      const bg = body.geometry
       return {
         shell,
-        bodyGeometry: bodyGeo.type,
-        rounded: (bodyGeo.parameters && bodyGeo.parameters.radius) > 0,
-        bodyRadius: bodyGeo.parameters ? bodyGeo.parameters.radius : 0,
-        segments: bodyGeo.parameters ? bodyGeo.parameters.segments : 0,
+        bodyGeometry: bg.type,
+        rounded: (bg.parameters && bg.parameters.radius) > 0,
+        bodyRadius: bg.parameters ? bg.parameters.radius : 0,
+        segments: bg.parameters ? bg.parameters.segments : 0,
         screenFromTermPane: !!pane,
         screenUsesPaneTexture: !!(pane && screenMesh.material && screenMesh.material.map === pane.texture),
         hasGlow: !!glowMesh,
@@ -225,6 +276,9 @@ export function createMonitor(opts = {}) {
             renderOrder: screenMesh.renderOrder,
           }
           : null,
+        /** G1：屏面（pane 的 mesh）是否正好填满机身内框（同样读取值器，不能读 worldW） */
+        screenFillsBody: !!pane && Math.abs((pane.width || 0) - (bodyW - bezelNow * 2)) < 1e-3,
+        size: { width: bodyW, height: bodyH, bezel: bezelNow },
         tris: countTris(grp),
       }
     },
