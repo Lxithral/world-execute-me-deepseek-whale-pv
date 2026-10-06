@@ -2063,3 +2063,109 @@ $ node .scratch_t51scan.mjs 209 211.9 0.2    # 片尾 209–211.9s
 3. **用户新指令（本轮 m05344/m05345/m05346）带来的额外工作**（已建活跃目标 `goal-1bdfb30e-1986-4e1d-be93-35a3391ce920`）：① 先完成 T54（本条已闭环）；② 修复本轮遇到的 bug —— `npm run check` §6「src/ 无歌词原文」6 处（既有基线，均在注释里）、T53 面板审计 `nestedWindow minPad=-0.3`（标题栏 `pad:0` 口径，与其它标题一致）、全片 gscan **g4 段 B 2 处**（`b:pendulum` 14.6–18s、`b:fourier` 18.6–22.4s，T42 已登记"不改检测器"）、`?shot ≥211.3` 字节相同帧；③ 把**完整影片以 4K 60fps 导出到桌面**并汇报路径与耗时（原 T55 的"完整导出"目标随此指令升级为 4K60 + 落桌面）。
 4. 全量 `?selftest`（分段）仍未跑，留 T55 终验。
 5. 本轮改动（`src/core/compositor.js`、`src/core/fx.js`、`src/main.js`）与 T40–T53 的改动**仍未 git 提交**；新增临时探针 `.scratch_crt.mjs`（gitignore）、证据目录 `out/t54/`（gitignore）。
+
+---
+
+# T55 终验：分段全量 `?selftest`（含 FIX_V5 §3）+ 完整 4K60 导出
+
+驱动：`docs/QUEUE.md` 的第一个 `[ ]` 项（T55，已完成并勾 `[x]`）。**不放宽任何门槛**：判据/阈值/检测器文件一个字未编辑（见下「门槛审计」）。证据见 `docs/REVIEW_T55.md`。
+
+## 完成定义逐条（QUEUE 规则 5–9）
+
+1) `npm run doctor` **PASS 5 / FAIL 0 / SKIP 0**（a 构建 / b1 `node --check` 75 文件 / b2 import 74 模块 / c 编码 149 文件（=148 + 本轮新增 `docs/REVIEW_T55.md`）/ d `__errors` 空）。注：第一次在 DSH 只读沙箱里 5 项全 FAIL 是沙箱禁止子进程管道 stdio（`spawnSync … EPERM`），与项目代码无关；文档写完后按最终冻结状态复跑 doctor，仍 **PASS 5 / FAIL 0**。
+2) 涉及时间段（全片 0–211.907s）每 0.2s 采样：`?selftest` r) 424 帧无同层 IoU>0.1、q) 424 采样点 pane 97 帧/hero 0 帧、gscan 1060 帧文字重叠 0 / G5 越界 0、`errors=0`。
+3) `docs/REVIEW_T55.md` 已写（23 行：4 个 FAIL/症状的根因-修法-复核表 + 证据 + 6 个关键帧 + 5 条结论 + 未验证项）。
+4) 该项**明确要求**"分段跑全量 selftest" ⇒ 用真 GPU 一次跑完 32 项（431s），**不是**跳过全量。
+5) 本段与 QUEUE 的 `完成:` 行都是单段摘要，未写长篇过程。
+6) 只改本题涉及的文件（下表 5 个 `src/` + 1 个 `tools/`），其他段落内容未动。
+
+## 改动（本轮 5 个 src 文件 + 1 个 dev 工具）
+
+| 文件:行 | 改动 | 针对 |
+| --- | --- | --- |
+| `src/scenes/j_overflow.js:56-63` | 删 `{t:144.5,kind:'shake',amount:0.8,dur:0.6}`（与 `{t:145.0,kind:'shake',amount:1.0,dur:1.0}` 是同一事件：144.5+0.6=145.1 重叠 0.1s），留 6 行 T55 注释 | t) |
+| `src/scenes/j_overflow.js:165` | 加法底色 `rgb(18,24,34)` → `rgb(23,30,42)`（平场，抬 129–130s 的 mean 以保 u)） | v)/u) |
+| `src/scenes/j_overflow.js:198,201-202` | 红色径向暗角整体 ×0.35；远角色 `rgba(255,104,104)`→`rgba(224,84,84)` | v) |
+| `src/scenes/j_overflow.js:214-221` | 上下红色扫描带只画中间 80%（`bx0=W*0.10`、`bw=W*0.80`） | v) |
+| `src/scenes/j_overflow.js:125-138` | 段 J 时间轴锚点改走 `ctx.cues.sec('J', k, fb)`（`:138`） | g) |
+| `src/scenes/c_define.js:521,821` | `color: 0x4687ad`、`gridMat.opacity = 0.62 * axOn * alive` | b) 段 C 34/38s 边缘密度 |
+| `src/lib/props/termpane.js:36` | `const SCALE = 2` → `export const SCALE = 2` | q2) |
+| `src/lib/props/index.js:14,245-254` | 补 import `SCALE`；断言从写死 1024×640 改为 `PANE_W*SCALE`/`PANE_H*SCALE`（仍 ≥2048 且宽高比一致 = **更严**） | q2) |
+| `src/main.js:1895,1904,1919` | b) 豁免左沿注释；`[145.6, 147.95]` 与 `src/core/exposure.js:110` 对齐 | b)/u) |
+| `tools/shoot.mjs`（`--out` 分支） | 截图改为「`#stage` 上叠 `#lyrics`」（同 `src/main.js:1412-1413`） | 用户报的 `?shot` 症状（dev 工具，非判据） |
+
+## 首轮终验的 3 个 FAIL → 修 → 复核
+
+| 项 | 根因 | 修法 | 复核 |
+| --- | --- | --- | --- |
+| v 四角亮度（判据 0.12） | 段 J 2D 叠加层：只作用于边缘的红色暗角峰值正落在四角（0.13–0.17）+ 整屏宽红扫描带落进左右 10% 角块 | 暗角 ×0.35、横带只画中间 80%、加法底色改平场 | 段 J 全段四角 ≤0.082；b) 边缘 6.9–23.8%（门槛 4%）；u) mean ≥0.101 |
+| t 重复（6s 窗 ≤2、间隔 ≥0.6s） | 144.5 与 145.0 的 shake 是同一事件 | 删 144.5 那条 | 终轮 t) PASS：79 条效果、6s 窗 ≤2、同类最小间隔 ≥0.6s |
+| q2 F2b（画布 ≥2048 + 宽高比一致） | `props/index.js` 把画布尺寸写死 1024×640 | 导出 `SCALE`、按 `PANE_W*SCALE` 断言 | 复测 `{"n":40,"bad":[]}`；终轮 q2) PASS |
+
+## 终轮判定（`out/t55/selftest_lines.txt`，真 GPU）
+
+```text
+PASS  b 画面密度  425 帧：非众数 ≥18%（器乐 ≥25%）、边缘 ≥4%
+PASS  r 文字重叠  424 帧（每 0.5s）无同层 IoU>0.1 重叠；显式豁免 96 处；ghost 事件 0 次（≤30）
+PASS  q 遮挡  424 个采样点：pane 在场 97 帧、hero 在场 0 帧；同屏 pane 最多 3 块、单块最大 16.2%
+PASS  u 曝光  391 个采样点全部达标（mean∈[0.10,0.45]、p95≤0.95、过曝≤2%）；豁免 34 点
+PASS  v 四角亮度  391 个非闪白采样点四角平均亮度均 ≤0.12（豁免 34 点）
+PASS  g6 光敏  最强 2s 窗口交替 0Hz（上限 2.5Hz）；最坏窗口 143.9–145.9s
+PASS  z1 棱镜三边  t=175.3 三边 374.1/374.1/374.1px，相对误差 0%（判据 <0.5%）
+PASS  z2 心脏 yaw  t=205.964 时 yaw 距 2π 整数倍 0.00000rad（<0.05）；角速度 0.213544 = HEART_SPIN
+PASS  z3 CRT 纵横比  t=0.5 裁剪差 2.16 / 压扁差 14.51 ⇒ 6.71×；t=0.7 6.26×；t=209.4 2.48×；t=209.8 3.41×
+[selftest] 32 项，FAIL 0 项，用时 431s
+```
+
+（其余行见 `out/t55/selftest_lines.txt`；首轮同口径是 `32 项，FAIL 3 项` = t/v/q2。）
+
+## 4K60 完整导出
+
+```powershell
+node tools/export_mp4.mjs --from 0 --to 211.907 --fps 60 --chunk 10 --frames jpeg --jpeg-q 0.98 `
+  --preset veryfast --crf 16 --scale 3840x2160 --out out/t55/final4k/world.execute.me_4K60.mp4 `
+  --url "http://127.0.0.1:5173/?res=1.7"
+```
+
+- 产物 `out/t55/final4k/world.execute.me_4K60.mp4` = **1,200,614,349 B**（mtime 2026-10-06 01:47:57）；`ffmpeg -i`：`Duration 00:03:31.91, bitrate 45326 kb/s`；`h264 (High), yuv420p, 3840x2160 [SAR 1:1 DAR 16:9], 45055 kb/s, 60 fps`；`aac (LC), 48000 Hz, stereo, 259 kb/s`；帧数 = 22 分块（21×600+114）= 12714。
+- 已覆盖桌面 `C:\Users\Lxithral\Desktop\world.execute.me_4K60.mp4`，SHA256 `F26D7B4600F15029110FAD055F0D0F6DBFE55B0E3D3DEFED8E15F9B1C5CCD969`（与源一致）。
+- 每帧渲染 mean **11.1ms**（p50 8.7/p95 24.3）、编码 mean **296.0ms**、传输 **13.9ms**、帧总 mean **321.0ms**（p50 302.7/p95 461.3）；**本次墙钟 3730.0s**；工具"预计全片 68.0 分钟"= 12714×321.0ms。报告里的「成片时长 191.900s」是续跑统计口径（(12714−1200)/60），实际 211.91s。
+- 本轮跑了两段：第一段 10-05 09:5x 起（后台）到 12.5% 被中止，`chunks/c0000`/`c0010` 各 600 帧保留；第二段由用户在自己终端跑同一条命令，`--resume` 跳过 1200 帧、实编 11514 帧。两段是同一份冻结代码（源码自 09:38 后未动）。
+
+## 门槛审计（机械核对）
+
+- `src/ui/globalrules.js` 2026-10-04 16:55:26、`src/ui/text.js` 15:14:31、`tools/selftest.mjs` 04:48:43 的 mtime 全部早于本轮起点 08:53 ⇒ 判据、检测器、阈值未编辑。
+- 本轮改动的 `src/` 只有 5 个（`src/main.js` 08:53:11、`src/scenes/c_define.js` 09:02:18、`src/lib/props/termpane.js` 09:17:03、`src/lib/props/index.js` 09:17:19、`src/scenes/j_overflow.js` 09:38:24）。
+- `git diff -- src/core/exposure.js` 全文只有段 J 豁免窗左沿 `from: 146.45 → 145.6`（T50 登记），右沿 147.95 与全部阈值未动。
+
+## T55 的关键结论
+
+1. **三道关卡在"不放宽任何门槛"下全过**：doctor PASS 5/0、全量 `?selftest` 32 项 FAIL 0（431s，历史上第一次跑到 z3）、4K60 全片导出完成并落桌面。
+2. **"分段跑"是工具链的需要，不是判据的需要**：判据都在页面里，SwiftShader 全量会触发页面自身「自检超时」（T23 第二轮记录）⇒ 换真 GPU 驱动同一套判据；`scan=0.5` 保持 FIX 原文步长（425 帧，比默认 1.0 更严）。
+3. **v)/t)/q2) 都是"改画面或加强检测"**：暗角 ×0.35 + 平场底色（避免修 v) 引入 u) 回归）；删掉重复 shake 而不是放松间隔判据；写死画布尺寸换成 `PANE_W*SCALE` 断言。
+4. **用户报的「`?shot ≥211.3` 字节相同帧」是探针缺陷，不是成片缺陷**：`vg` 是 `#lyrics` 的 context（`compositor.js:305 return this.lyricsCtx()`），`tools/shoot.mjs:234` 只抓 `#stage` ⇒ 歌词/片尾字幕永不在截图里；导出合并两层（`main.js:1412-1413`），成片有字幕。已把 dev 截图改成与导出同源。**同时更正 T54 结论 4/5 与 `docs/REVIEW_T54.md:19`**："credits 画在 `#stage`"是错的（按规则 6 未改 T54 的段落文件）。
+5. **FIX_V5 §3 四条自检全部落地并被跑到**：z1 误差 0%、z2 0.00000rad 且角速度 = `HEART_SPIN` 0.213544、z3 最小 2.48×、g6 最坏窗 0Hz。
+6. **旁证一致**：`npm run check` PASS 29/FAIL 0（含 §6 `src/` 无歌词原文）；全片 gscan 1060 帧 g2/g3/g4/g5/g6/g9 全 PASS（g4 段 B 两处与 g5 整片越界均在 T43–T54 归零）。
+
+## 决策日志（R16：T55 终验）
+
+| # | 决策 | 原因 | 回退方式 |
+| --- | --- | --- | --- |
+| R16-D1 | 用真 GPU 的 `.scratch_selftest.mjs` 驱动页面自己的判据，而不是绕过/放宽判据 | 判据全在页面里（`?selftest`），脚本只换渲染后端；SwiftShader 全量会触发页面「自检超时」 | 直接用 `tools/selftest.mjs`（SwiftShader） |
+| R16-D2 | `scan=0.5` 保持 FIX 原文步长（425 帧），不用默认 1.0 | 步长是判据口径的一部分，改宽＝放宽门槛 | 改 URL 参数 |
+| R16-D3 | v) 改画面（暗角 ×0.35 + 横带 80% + 平场底色）而不是调四角阈值 | 阈值是 G7/§2.4 的硬指标；暗角峰值落四角是实现副作用 | 恢复暗角原值 |
+| R16-D4 | t) 删 144.5 shake（同事件重复），保留 145.0 | 既满足「间隔 ≥0.6s」，又不改 FIX_V5 §J 的碎裂/黑场时刻（由 `T_SHATTER/T_BLACK` 驱动） | 加回 fx 条目 |
+| R16-D5 | q2) 把写死 1024×640 换成 `PANE_W*SCALE` 断言（更严） | 断言应随面板尺寸有效，而不是钉死旧尺寸 | 恢复写死值 |
+| R16-D6 | 4K 走 `?res=1.7` + JPEG q0.98 + `--scale 3840x2160(lanczos)` + `--preset veryfast` | 原生 `res=2` 会触发每帧 4–18s GPU 停顿；`--preset slow` 会把 12714 帧推向工具写死的 12h 上限（`export_mp4.mjs:527`）；质量由 `--crf 16` 承担 | 改回 `--preset slow` |
+| R16-D7 | `tools/shoot.mjs --out` 改成叠 `#lyrics`（与导出同源） | 截图工具应反映成片合成结果；`src/` 与判据不动 | 恢复只抓 `#stage` |
+| R16-D8 | 判据/阈值/检测器文件（`globalrules.js`/`text.js`/`selftest.mjs`）一个字不动 | 改它们＝放宽门槛 | — |
+| R16-D9 | 按规则 6 不改 `docs/REVIEW_T54.md`，只在本段记录"credits 画在 `#lyrics`"的更正 | 规则 6：不动其他段落文件 | — |
+
+### 仍未完成 / 已知问题（T55 之后）
+
+1. **队列空**：T55 是最后一项（已 `[x]`）；T26–T35 中 T31–T35 仍 `[暂缓]`（用户指令：改走离线导出）。
+2. **T23c② 的真实 GPU `?perf p50/p95` 仍需用户提供**（本机已有可用 ANGLE AMD D3D11 路径，T48–T54 的每帧 mean 都从这条路径实测）。
+3. **FIX_V5 §3 的三条自检仍未进 `src/ui/globalrules.js`**（现在随页面 `?selftest` 的 z1/z2/z3 跑）：写判据＝改判据文件，本轮按门槛要求不做。
+4. **git 状态**：`src/` 与 `tools/` 的 T40–T55 改动**已由用户提交**在 `2f71253`（2026-10-05 18:09:38「又改了点」，77 文件；含本轮 `src/scenes/j_overflow.js` 的三处 v)/t)、`src/scenes/c_define.js`、`src/lib/props/*`、`tools/shoot.mjs`），故**终轮 selftest 与 4K 导出用的就是 HEAD 的那份代码**（提交后 `git status -- src tools` 干净）；未提交的只有本轮三个文档（`docs/CHECKPOINT.md`、`docs/QUEUE.md`、`docs/REVIEW_T55.md`）与清理带来的 `.tmp/` 删除（`.tmp/` 曾被 `2f71253` 提交，本轮按 m01084 删除）。41 个临时探针 `.scratch_*.mjs`（266KB）与 3 个 `.scratch_eval_*.js` 已按用户"T55 收尾后再删"删除（官方工具 `tools/selftest.mjs`、`tools/shoot.mjs`、`tools/check.mjs`、`tools/export_mp4.mjs` 保留）；`out/t55/`、`dist/` 等为 gitignore/本地产物。
+5. **已清理的测试产物**（用户 m01084）：`out/t01…t54`、`out/t55/film4k`（旧 4K 3.4GB）、`out/t55/chunks`、`.tmp/`、`out/` 根早期产物、TEMP 探针 profile 5 个 ⇒ 释放 C 1.13GB / D 4.16GB；导出完成后又删掉 `out/t55/final4k/chunks/`（22 块 **1138.3MB**）与中转 `world.execute.me_4K60._video.mp4`（**1138.3MB**）⇒ 再释放 ≈2.2GB。现 `out/` 只剩三件：`t55/gscan.log`、`t55/selftest_lines.txt`、`t55/final4k/world.execute.me_4K60.mp4`（1145MB，SHA256 与桌面副本一致）；项目（不含 `node_modules`/`.git`）1257.3MB，磁盘空闲 C 44.3GB / D 61.5GB。
+6. **上一版 4K 产物已作废**：桌面旧文件 1,195,078,343 B / 2026-10-05 05:36:25 早于本轮源码改动，已被 2026-10-06 01:47:57 的新产物取代（SHA256 `F26D7B46…CCD969`）。

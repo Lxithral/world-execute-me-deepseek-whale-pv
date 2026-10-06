@@ -1,1 +1,0 @@
-{"info":{"typeofRenderThree":"function","own":false,"protoRT":"function","methods":["constructor","resize","clearLyrics","lyricsCtx","clearLayers","setupPost3D","renderThree","setDprScale","present","applyPost","fadeStage","dispose"]},"afterPatch":{"n":2,"okOwn":true,"descIsFn":"function"},"composeCalls":0}

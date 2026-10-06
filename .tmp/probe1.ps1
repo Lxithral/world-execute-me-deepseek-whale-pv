@@ -1,1 +1,0 @@
-﻿node tools/shoot.mjs --url "http://127.0.0.1:5173/?selftest=0" --probe "" --eval "window.__renderAt(116); const b=window.__textBoxes(); const L=b.filter(x=>x.layer==='lyrics'); return JSON.stringify({n:b.length, lyrics:L.slice(0,10)})" 2>&1
